@@ -21,7 +21,6 @@ namespace MacacaGames.RuntimeBugReporter
         private byte[] videoBytes;
         private Texture2D screenshotPreview;
         private ScreenshotAnnotator screenshotAnnotator;
-        private bool isAnnotatingScreenshot;
         private int annotationColorIndex;
         private int annotationSizeIndex = 1;
         private string reporter = "";
@@ -107,7 +106,6 @@ namespace MacacaGames.RuntimeBugReporter
             screenshotBytes = null;
             videoBytes = null;
             screenshotAnnotator = null;
-            isAnnotatingScreenshot = false;
             videoRecorder.MarkIncident(bytes => videoBytes = bytes);
 
             if (settings.includeScreenshot)
@@ -243,13 +241,11 @@ namespace MacacaGames.RuntimeBugReporter
         private void DrawDesktopContent()
         {
             var availableWidth = windowRect.width - 56f * styleScale;
-            var leftWidth = availableWidth * 0.42f;
+            var leftWidth = availableWidth * 0.52f;
             GUILayout.BeginHorizontal(GUILayout.ExpandHeight(true));
             GUILayout.Space(28 * styleScale);
             GUILayout.BeginVertical(cardStyle, GUILayout.Width(leftWidth), GUILayout.ExpandHeight(true));
-            DrawScreenshotPanel(isAnnotatingScreenshot
-                ? Mathf.Clamp(windowRect.height * 0.48f, 280f, 460f)
-                : Mathf.Clamp(windowRect.height * 0.34f, 210f, 320f));
+            DrawScreenshotPanel(Mathf.Clamp(windowRect.height * 0.43f, 320f, 460f));
             GUILayout.Space(16 * styleScale);
             DrawCaptureSummary();
             GUILayout.FlexibleSpace();
@@ -271,7 +267,7 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.Space(28 * styleScale);
             GUILayout.BeginVertical(cardStyle, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
             formScroll = GUILayout.BeginScrollView(formScroll, false, true, GUILayout.ExpandHeight(true));
-            DrawScreenshotPanel((isAnnotatingScreenshot ? 260f : 160f) * styleScale);
+            DrawScreenshotPanel(300f * styleScale);
             GUILayout.Space(14 * styleScale);
             DrawCaptureSummary();
             GUILayout.Space(18 * styleScale);
@@ -293,8 +289,7 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.Label(screenshotBytes != null ? "READY" : "UNAVAILABLE", statusStyle);
             GUILayout.EndHorizontal();
 
-            var aspect = screenshotPreview != null ? screenshotPreview.width / (float)Mathf.Max(1, screenshotPreview.height) : 16f / 9f;
-            var previewHeight = Mathf.Min(maximumHeight, Mathf.Max(120f * styleScale, 390f * styleScale / aspect));
+            var previewHeight = Mathf.Max(160f * styleScale, maximumHeight);
             var rect = GUILayoutUtility.GetRect(100f, previewHeight, GUILayout.ExpandWidth(true));
             GUI.DrawTexture(rect, fieldTexture);
             if (screenshotPreview != null)
@@ -302,7 +297,7 @@ namespace MacacaGames.RuntimeBugReporter
                 var imageRect = new Rect(rect.x + 3, rect.y + 3, rect.width - 6, rect.height - 6);
                 var fittedImageRect = FitTextureRect(imageRect, screenshotPreview.width, screenshotPreview.height);
                 GUI.DrawTexture(fittedImageRect, screenshotPreview, ScaleMode.StretchToFill, false);
-                if (isAnnotatingScreenshot && !isSending)
+                if (!isSending && screenshotAnnotator != null)
                     HandleScreenshotAnnotation(fittedImageRect);
             }
             else
@@ -311,27 +306,11 @@ namespace MacacaGames.RuntimeBugReporter
             }
 
             GUILayout.Space(10 * styleScale);
-            GUI.enabled = !isSending && !isOpening;
-            if (!isAnnotatingScreenshot)
-            {
-                GUILayout.BeginHorizontal();
-                GUI.enabled = GUI.enabled && screenshotAnnotator != null;
-                if (GUILayout.Button("ANNOTATE", primaryButtonStyle, GUILayout.Height(48 * styleScale)))
-                    isAnnotatingScreenshot = true;
-                GUI.enabled = !isSending && !isOpening;
-                GUILayout.Space(10 * styleScale);
-                if (GUILayout.Button("RECAPTURE", buttonStyle, GUILayout.Height(48 * styleScale)))
-                    StartCoroutine(RecaptureScreenshot());
-                GUILayout.EndHorizontal();
-            }
-            else
-            {
-                DrawAnnotationToolbar();
-            }
+            DrawAnnotationToolbar(!isSending && !isOpening && screenshotAnnotator != null);
             GUI.enabled = true;
         }
 
-        private void DrawAnnotationToolbar()
+        private void DrawAnnotationToolbar(bool canInteract)
         {
             var compact = windowRect.width < 900f;
             if (compact)
@@ -345,18 +324,15 @@ namespace MacacaGames.RuntimeBugReporter
                 GUILayout.Label("DRAW ON THE SCREENSHOT", labelStyle);
                 GUILayout.FlexibleSpace();
             }
-            GUI.enabled = screenshotAnnotator != null && screenshotAnnotator.CanUndo;
+            GUI.enabled = canInteract && screenshotAnnotator.CanUndo;
             if (GUILayout.Button("UNDO", buttonStyle, compact ? GUILayout.ExpandWidth(true) : GUILayout.Width(96 * styleScale), GUILayout.Height(44 * styleScale)))
                 screenshotAnnotator.Undo();
-            GUI.enabled = screenshotAnnotator != null && screenshotAnnotator.HasAnnotations;
+            GUI.enabled = canInteract && screenshotAnnotator.HasAnnotations;
             if (GUILayout.Button("CLEAR", buttonStyle, compact ? GUILayout.ExpandWidth(true) : GUILayout.Width(96 * styleScale), GUILayout.Height(44 * styleScale)))
                 screenshotAnnotator.Clear();
-            GUI.enabled = true;
-            if (GUILayout.Button("DONE", primaryButtonStyle, compact ? GUILayout.ExpandWidth(true) : GUILayout.Width(96 * styleScale), GUILayout.Height(44 * styleScale)))
-            {
-                screenshotAnnotator?.EndStroke();
-                isAnnotatingScreenshot = false;
-            }
+            GUI.enabled = canInteract;
+            if (GUILayout.Button("RECAPTURE", buttonStyle, compact ? GUILayout.ExpandWidth(true) : GUILayout.Width(112 * styleScale), GUILayout.Height(44 * styleScale)))
+                StartCoroutine(RecaptureScreenshot());
             GUILayout.EndHorizontal();
             GUILayout.Space(8 * styleScale);
 
@@ -503,7 +479,6 @@ namespace MacacaGames.RuntimeBugReporter
             statusIsError = false;
             status = "Recapturing screenshot…";
             screenshotAnnotator = null;
-            isAnnotatingScreenshot = false;
             IsOpen = false;
             yield return CaptureUtility.CapturePng((bytes, texture) =>
             {
