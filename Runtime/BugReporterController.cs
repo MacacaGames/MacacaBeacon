@@ -161,7 +161,7 @@ namespace MacacaGames.RuntimeBugReporter
             EnsureStyles(uiScale);
             GUI.depth = -10000;
             var overlay = new Rect(0, 0, Screen.width, Screen.height);
-            GUI.color = new Color(0f, 0.02f, 0.04f, settings.backdropOpacity);
+            GUI.color = new Color(0.247f, 0.227f, 0.196f, settings.backdropOpacity);
             GUI.DrawTexture(overlay, Texture2D.whiteTexture);
             GUI.color = Color.white;
 
@@ -285,7 +285,7 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.BeginHorizontal();
             DrawLabel("SCREENSHOT");
             GUILayout.FlexibleSpace();
-            statusStyle.normal.textColor = new Color(0.49f, 0.83f, 1f);
+            statusStyle.normal.textColor = new Color(0.09f, 0.48f, 0.50f);
             GUILayout.Label(screenshotBytes != null ? "READY" : "UNAVAILABLE", statusStyle);
             GUILayout.EndHorizontal();
 
@@ -448,7 +448,7 @@ namespace MacacaGames.RuntimeBugReporter
             if (!string.IsNullOrEmpty(status))
             {
                 GUILayout.Space(10 * styleScale);
-                statusStyle.normal.textColor = statusIsError ? new Color(1f, 0.55f, 0.55f) : new Color(0.49f, 0.83f, 1f);
+                statusStyle.normal.textColor = statusIsError ? new Color(0.70f, 0.23f, 0.20f) : new Color(0.09f, 0.48f, 0.50f);
                 GUILayout.Label(status, statusStyle);
             }
         }
@@ -619,23 +619,25 @@ namespace MacacaGames.RuntimeBugReporter
 
             ReleaseStyleTextures();
             styleScale = scale;
-            var window = MakeTexture(new Color(0.075f, 0.102f, 0.145f, 1f));
-            var card = MakeTexture(new Color(0.105f, 0.145f, 0.205f, 1f));
-            var field = MakeTexture(new Color(0.045f, 0.075f, 0.115f, 1f));
-            var fieldHover = MakeTexture(new Color(0.065f, 0.115f, 0.165f, 1f));
-            var fieldFocus = MakeTexture(new Color(0.075f, 0.18f, 0.27f, 1f));
-            var secondary = MakeTexture(new Color(0.14f, 0.20f, 0.29f, 1f));
-            var secondaryHover = MakeTexture(new Color(0.19f, 0.29f, 0.41f, 1f));
-            var secondaryActive = MakeTexture(new Color(0.09f, 0.15f, 0.22f, 1f));
-            var selected = MakeTexture(new Color(0.02f, 0.40f, 0.55f, 1f));
-            var selectedHover = MakeTexture(new Color(0.03f, 0.50f, 0.66f, 1f));
-            var accent = MakeTexture(new Color(0.22f, 0.74f, 0.97f, 1f));
-            var accentHover = MakeTexture(new Color(0.49f, 0.83f, 1f, 1f));
-            var accentActive = MakeTexture(new Color(0.12f, 0.58f, 0.78f, 1f));
+            // Macaca Games brand palette: warm paper, charcoal ink, monkey orange and a small cyan accent.
+            var window = MakeTexture(new Color(0.980f, 0.965f, 0.925f, 1f));
+            var card = MakeTexture(Color.white);
+            var preview = MakeTexture(new Color(0.039f, 0.071f, 0.125f, 1f));
+            var field = MakeTexture(new Color(0.949f, 0.922f, 0.859f, 1f));
+            var fieldHover = MakeTexture(new Color(1f, 0.973f, 0.914f, 1f));
+            var fieldFocus = MakeTexture(new Color(1f, 0.941f, 0.824f, 1f));
+            var secondary = MakeTexture(new Color(0.941f, 0.914f, 0.855f, 1f));
+            var secondaryHover = MakeTexture(new Color(0.902f, 0.863f, 0.796f, 1f));
+            var secondaryActive = MakeTexture(new Color(0.867f, 0.820f, 0.745f, 1f));
+            var selected = MakeTexture(new Color(1f, 0.686f, 0.094f, 1f));
+            var selectedHover = MakeTexture(new Color(0.945f, 0.502f, 0.110f, 1f));
+            var accent = MakeTexture(new Color(0.945f, 0.502f, 0.110f, 1f));
+            var accentHover = MakeTexture(new Color(1f, 0.686f, 0.094f, 1f));
+            var accentActive = MakeTexture(new Color(0.831f, 0.373f, 0.055f, 1f));
 
             windowTexture = window;
             accentTexture = accent;
-            fieldTexture = field;
+            fieldTexture = preview;
 
             titleStyle = new GUIStyle(GUI.skin.label)
             {
@@ -644,7 +646,7 @@ namespace MacacaGames.RuntimeBugReporter
                 alignment = TextAnchor.MiddleLeft,
                 margin = new RectOffset(0, 0, 0, 0)
             };
-            titleStyle.normal.textColor = new Color(0.97f, 0.98f, 1f);
+            titleStyle.normal.textColor = new Color(0.247f, 0.227f, 0.196f);
 
             subtitleStyle = new GUIStyle(GUI.skin.label)
             {
@@ -652,7 +654,7 @@ namespace MacacaGames.RuntimeBugReporter
                 alignment = TextAnchor.MiddleLeft,
                 margin = new RectOffset(0, 0, 2, 0)
             };
-            subtitleStyle.normal.textColor = new Color(0.68f, 0.76f, 0.86f);
+            subtitleStyle.normal.textColor = new Color(0.42f, 0.39f, 0.34f);
 
             labelStyle = new GUIStyle(GUI.skin.label)
             {
@@ -660,7 +662,7 @@ namespace MacacaGames.RuntimeBugReporter
                 fontStyle = FontStyle.Bold,
                 margin = new RectOffset(0, 0, Mathf.RoundToInt(3 * scale), Mathf.RoundToInt(7 * scale))
             };
-            labelStyle.normal.textColor = new Color(0.78f, 0.85f, 0.94f);
+            labelStyle.normal.textColor = new Color(0.31f, 0.29f, 0.25f);
 
             hintStyle = new GUIStyle(GUI.skin.label)
             {
@@ -668,7 +670,7 @@ namespace MacacaGames.RuntimeBugReporter
                 wordWrap = true,
                 alignment = TextAnchor.MiddleLeft
             };
-            hintStyle.normal.textColor = new Color(0.69f, 0.76f, 0.85f);
+            hintStyle.normal.textColor = new Color(0.43f, 0.40f, 0.35f);
 
             cardStyle = new GUIStyle(GUI.skin.box)
             {
@@ -685,26 +687,27 @@ namespace MacacaGames.RuntimeBugReporter
             fieldStyle.normal.background = field;
             fieldStyle.hover.background = fieldHover;
             fieldStyle.focused.background = fieldFocus;
-            fieldStyle.normal.textColor = fieldStyle.hover.textColor = fieldStyle.focused.textColor = Color.white;
+            var ink = new Color(0.247f, 0.227f, 0.196f);
+            fieldStyle.normal.textColor = fieldStyle.hover.textColor = fieldStyle.focused.textColor = ink;
 
             areaStyle = new GUIStyle(fieldStyle) { wordWrap = true, alignment = TextAnchor.UpperLeft };
 
-            buttonStyle = CreateButtonStyle(scale, secondary, secondaryHover, secondaryActive, Color.white);
-            categoryStyle = CreateButtonStyle(scale, secondary, secondaryHover, secondaryActive, Color.white);
+            buttonStyle = CreateButtonStyle(scale, secondary, secondaryHover, secondaryActive, ink);
+            categoryStyle = CreateButtonStyle(scale, secondary, secondaryHover, secondaryActive, ink);
             categoryStyle.onNormal.background = selected;
             categoryStyle.onHover.background = selectedHover;
             categoryStyle.onActive.background = selectedHover;
-            categoryStyle.onNormal.textColor = categoryStyle.onHover.textColor = categoryStyle.onActive.textColor = Color.white;
+            categoryStyle.onNormal.textColor = categoryStyle.onHover.textColor = categoryStyle.onActive.textColor = ink;
             categoryStyle.margin = new RectOffset(4, 4, 4, 4);
 
-            primaryButtonStyle = CreateButtonStyle(scale, accent, accentHover, accentActive, new Color(0.02f, 0.08f, 0.12f));
+            primaryButtonStyle = CreateButtonStyle(scale, accent, accentHover, accentActive, new Color(0.17f, 0.15f, 0.13f));
             primaryButtonStyle.fontSize = Mathf.RoundToInt(14 * scale);
             closeButtonStyle = new GUIStyle(buttonStyle) { fontSize = Mathf.RoundToInt(12 * scale) };
 
             statusStyle = new GUIStyle(hintStyle) { fontStyle = FontStyle.Bold };
-            statusStyle.normal.textColor = new Color(0.49f, 0.83f, 1f);
+            statusStyle.normal.textColor = new Color(0.09f, 0.48f, 0.50f);
             validationStyle = new GUIStyle(hintStyle) { fontStyle = FontStyle.Bold };
-            validationStyle.normal.textColor = new Color(1f, 0.61f, 0.61f);
+            validationStyle.normal.textColor = new Color(0.70f, 0.23f, 0.20f);
         }
 
         private GUIStyle CreateButtonStyle(float scale, Texture2D normal, Texture2D hover, Texture2D active, Color text)
