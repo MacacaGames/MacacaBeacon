@@ -8,6 +8,9 @@ namespace MacacaGames.RuntimeBugReporter
 {
     internal sealed class BugReporterController : MonoBehaviour
     {
+        private static readonly string[] AnnotationColorLabels = { "RED", "YELLOW", "CYAN" };
+        private static readonly string[] AnnotationSizeLabels = { "S", "M", "L" };
+
         internal static BugReporterController Instance { get; private set; }
         internal bool IsOpen { get; private set; }
 
@@ -17,6 +20,10 @@ namespace MacacaGames.RuntimeBugReporter
         private byte[] screenshotBytes;
         private byte[] videoBytes;
         private Texture2D screenshotPreview;
+        private ScreenshotAnnotator screenshotAnnotator;
+        private bool isAnnotatingScreenshot;
+        private int annotationColorIndex;
+        private int annotationSizeIndex = 1;
         private string reporter = "";
         private string title = "";
         private string description = "";
@@ -99,6 +106,8 @@ namespace MacacaGames.RuntimeBugReporter
             status = "Capturing context…";
             screenshotBytes = null;
             videoBytes = null;
+            screenshotAnnotator = null;
+            isAnnotatingScreenshot = false;
             videoRecorder.MarkIncident(bytes => videoBytes = bytes);
 
             if (settings.includeScreenshot)
@@ -108,6 +117,7 @@ namespace MacacaGames.RuntimeBugReporter
                     screenshotBytes = bytes;
                     if (screenshotPreview != null) Destroy(screenshotPreview);
                     screenshotPreview = texture;
+                    screenshotAnnotator = texture == null ? null : new ScreenshotAnnotator(texture);
                 });
             }
 
@@ -237,7 +247,9 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.BeginHorizontal(GUILayout.ExpandHeight(true));
             GUILayout.Space(28 * styleScale);
             GUILayout.BeginVertical(cardStyle, GUILayout.Width(leftWidth), GUILayout.ExpandHeight(true));
-            DrawScreenshotPanel(Mathf.Clamp(windowRect.height * 0.34f, 210f, 320f));
+            DrawScreenshotPanel(isAnnotatingScreenshot
+                ? Mathf.Clamp(windowRect.height * 0.48f, 280f, 460f)
+                : Mathf.Clamp(windowRect.height * 0.34f, 210f, 320f));
             GUILayout.Space(16 * styleScale);
             DrawCaptureSummary();
             GUILayout.FlexibleSpace();
@@ -259,7 +271,7 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.Space(28 * styleScale);
             GUILayout.BeginVertical(cardStyle, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
             formScroll = GUILayout.BeginScrollView(formScroll, false, true, GUILayout.ExpandHeight(true));
-            DrawScreenshotPanel(160 * styleScale);
+            DrawScreenshotPanel((isAnnotatingScreenshot ? 260f : 160f) * styleScale);
             GUILayout.Space(14 * styleScale);
             DrawCaptureSummary();
             GUILayout.Space(18 * styleScale);
@@ -288,7 +300,10 @@ namespace MacacaGames.RuntimeBugReporter
             if (screenshotPreview != null)
             {
                 var imageRect = new Rect(rect.x + 3, rect.y + 3, rect.width - 6, rect.height - 6);
-                GUI.DrawTexture(imageRect, screenshotPreview, ScaleMode.ScaleToFit, false);
+                var fittedImageRect = FitTextureRect(imageRect, screenshotPreview.width, screenshotPreview.height);
+                GUI.DrawTexture(fittedImageRect, screenshotPreview, ScaleMode.StretchToFill, false);
+                if (isAnnotatingScreenshot && !isSending)
+                    HandleScreenshotAnnotation(fittedImageRect);
             }
             else
             {
@@ -297,9 +312,106 @@ namespace MacacaGames.RuntimeBugReporter
 
             GUILayout.Space(10 * styleScale);
             GUI.enabled = !isSending && !isOpening;
-            if (GUILayout.Button("RECAPTURE SCREENSHOT", buttonStyle, GUILayout.Height(44 * styleScale)))
-                StartCoroutine(RecaptureScreenshot());
+            if (!isAnnotatingScreenshot)
+            {
+                GUILayout.BeginHorizontal();
+                GUI.enabled = GUI.enabled && screenshotAnnotator != null;
+                if (GUILayout.Button("ANNOTATE", primaryButtonStyle, GUILayout.Height(48 * styleScale)))
+                    isAnnotatingScreenshot = true;
+                GUI.enabled = !isSending && !isOpening;
+                GUILayout.Space(10 * styleScale);
+                if (GUILayout.Button("RECAPTURE", buttonStyle, GUILayout.Height(48 * styleScale)))
+                    StartCoroutine(RecaptureScreenshot());
+                GUILayout.EndHorizontal();
+            }
+            else
+            {
+                DrawAnnotationToolbar();
+            }
             GUI.enabled = true;
+        }
+
+        private void DrawAnnotationToolbar()
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("DRAW ON THE SCREENSHOT", labelStyle);
+            GUILayout.FlexibleSpace();
+            GUI.enabled = screenshotAnnotator != null && screenshotAnnotator.CanUndo;
+            if (GUILayout.Button("UNDO", buttonStyle, GUILayout.Width(96 * styleScale), GUILayout.Height(44 * styleScale)))
+                screenshotAnnotator.Undo();
+            GUI.enabled = screenshotAnnotator != null && screenshotAnnotator.HasAnnotations;
+            if (GUILayout.Button("CLEAR", buttonStyle, GUILayout.Width(96 * styleScale), GUILayout.Height(44 * styleScale)))
+                screenshotAnnotator.Clear();
+            GUI.enabled = true;
+            if (GUILayout.Button("DONE", primaryButtonStyle, GUILayout.Width(96 * styleScale), GUILayout.Height(44 * styleScale)))
+            {
+                screenshotAnnotator?.EndStroke();
+                isAnnotatingScreenshot = false;
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.Space(8 * styleScale);
+
+            GUILayout.BeginHorizontal();
+            annotationColorIndex = GUILayout.SelectionGrid(annotationColorIndex, AnnotationColorLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
+            GUILayout.Space(10 * styleScale);
+            annotationSizeIndex = GUILayout.SelectionGrid(annotationSizeIndex, AnnotationSizeLabels, 3, categoryStyle, GUILayout.Width(210 * styleScale), GUILayout.Height(44 * styleScale));
+            GUILayout.EndHorizontal();
+        }
+
+        private void HandleScreenshotAnnotation(Rect imageRect)
+        {
+            var current = Event.current;
+            var controlId = GUIUtility.GetControlID("MacacaBeaconScreenshotAnnotation".GetHashCode(), FocusType.Passive, imageRect);
+            if (current.type == EventType.MouseDown && current.button == 0 && imageRect.Contains(current.mousePosition))
+            {
+                GUIUtility.hotControl = controlId;
+                screenshotAnnotator.BeginStroke(ToNormalizedPoint(imageRect, current.mousePosition), SelectedAnnotationColor(), SelectedBrushRadius());
+                current.Use();
+            }
+            else if (current.type == EventType.MouseDrag && GUIUtility.hotControl == controlId)
+            {
+                screenshotAnnotator.AddPoint(ToNormalizedPoint(imageRect, current.mousePosition));
+                current.Use();
+            }
+            else if (current.type == EventType.MouseUp && GUIUtility.hotControl == controlId)
+            {
+                screenshotAnnotator.AddPoint(ToNormalizedPoint(imageRect, current.mousePosition));
+                screenshotAnnotator.EndStroke();
+                GUIUtility.hotControl = 0;
+                current.Use();
+            }
+        }
+
+        private Color32 SelectedAnnotationColor()
+        {
+            switch (annotationColorIndex)
+            {
+                case 1: return new Color32(255, 214, 64, 255);
+                case 2: return new Color32(35, 215, 242, 255);
+                default: return new Color32(255, 72, 82, 255);
+            }
+        }
+
+        private int SelectedBrushRadius()
+        {
+            var shortEdge = Mathf.Min(screenshotAnnotator.Width, screenshotAnnotator.Height);
+            var ratio = annotationSizeIndex == 0 ? 0.004f : annotationSizeIndex == 2 ? 0.014f : 0.008f;
+            return Mathf.Max(2, Mathf.RoundToInt(shortEdge * ratio));
+        }
+
+        private static Vector2 ToNormalizedPoint(Rect rect, Vector2 point)
+        {
+            return new Vector2(
+                Mathf.Clamp01((point.x - rect.x) / Mathf.Max(1f, rect.width)),
+                Mathf.Clamp01((point.y - rect.y) / Mathf.Max(1f, rect.height)));
+        }
+
+        private static Rect FitTextureRect(Rect bounds, int textureWidth, int textureHeight)
+        {
+            var scale = Mathf.Min(bounds.width / Mathf.Max(1, textureWidth), bounds.height / Mathf.Max(1, textureHeight));
+            var width = textureWidth * scale;
+            var height = textureHeight * scale;
+            return new Rect(bounds.x + (bounds.width - width) * 0.5f, bounds.y + (bounds.height - height) * 0.5f, width, height);
         }
 
         private void DrawCaptureSummary()
@@ -370,12 +482,15 @@ namespace MacacaGames.RuntimeBugReporter
             isOpening = true;
             statusIsError = false;
             status = "Recapturing screenshot…";
+            screenshotAnnotator = null;
+            isAnnotatingScreenshot = false;
             IsOpen = false;
             yield return CaptureUtility.CapturePng((bytes, texture) =>
             {
                 screenshotBytes = bytes;
                 if (screenshotPreview != null) Destroy(screenshotPreview);
                 screenshotPreview = texture;
+                screenshotAnnotator = texture == null ? null : new ScreenshotAnnotator(texture);
             });
             IsOpen = true;
             isOpening = false;
@@ -439,7 +554,12 @@ namespace MacacaGames.RuntimeBugReporter
             report.Fields["UTC"] = report.CreatedUtc.ToString("O");
 
             if (settings.includeScreenshot && screenshotBytes != null)
-                AddAttachmentIfAllowed(report, new BugReportAttachment("bug-" + report.Id + ".png", "image/png", screenshotBytes, "Game screenshot at report time"));
+            {
+                var finalScreenshot = screenshotAnnotator != null && screenshotAnnotator.HasAnnotations
+                    ? screenshotAnnotator.EncodePng()
+                    : screenshotBytes;
+                AddAttachmentIfAllowed(report, new BugReportAttachment("bug-" + report.Id + ".png", "image/png", finalScreenshot, "Game screenshot at report time with optional annotations"));
+            }
             if (settings.enableRollingVideo && videoBytes != null)
                 AddAttachmentIfAllowed(report, new BugReportAttachment("bug-" + report.Id + ".avi", "video/x-msvideo", videoBytes, "Gameplay around report time"));
             if (settings.includeDiagnostics || settings.includeRecentLogs)

@@ -49,7 +49,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         [Header("Form")]
         public string reportTitle = "MACACA BEACON";
-        public string privacyNotice = "This report sends your description, screenshot, recent logs, and device diagnostics to the development team for debugging only.";
+        public string privacyNotice = "This report sends your description, screenshot, recent logs, and device diagnostics to the development team for debugging only. A local copy is retained if upload fails.";
         public string[] categories = { "Gameplay", "UI", "Visual", "Audio", "Performance", "Other" };
 
         public static BugReporterSettings LoadOrDefault()
