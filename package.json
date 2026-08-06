@@ -1,0 +1,23 @@
+{
+  "name": "com.macacagames.beacon",
+  "version": "0.1.0",
+  "displayName": "Macaca Beacon",
+  "description": "Macaca Games' modular in-game issue beacon with an IMGUI form, screenshots, rolling MJPEG video, diagnostics, and Slack delivery.",
+  "unity": "2021.3",
+  "keywords": [
+    "bug",
+    "reporter",
+    "slack",
+    "diagnostics"
+  ],
+  "author": {
+    "name": "Macaca Games"
+  },
+  "samples": [
+    {
+      "displayName": "Runtime Setup",
+      "description": "Example bootstrap component for projects that prefer scene-based setup.",
+      "path": "Samples~/RuntimeSetup"
+    }
+  ]
+}
