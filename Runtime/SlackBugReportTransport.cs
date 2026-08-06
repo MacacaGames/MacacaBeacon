@@ -9,51 +9,52 @@ namespace MacacaGames.RuntimeBugReporter
 {
     public sealed class SlackBugReportTransport : IBugReportTransport
     {
+        private const string PostMessageEndpoint = "https://slack.com/api/chat.postMessage";
         private const string UploadUrlEndpoint = "https://slack.com/api/files.getUploadURLExternal";
         private const string CompleteUploadEndpoint = "https://slack.com/api/files.completeUploadExternal";
-        private readonly string webhookUrl;
         private readonly string botToken;
         private readonly string channelId;
 
-        public SlackBugReportTransport(string webhookUrl, string botToken, string channelId)
+        public SlackBugReportTransport(string botToken, string channelId)
         {
-            this.webhookUrl = webhookUrl == null ? "" : webhookUrl.Trim();
             this.botToken = botToken == null ? "" : botToken.Trim();
             this.channelId = channelId == null ? "" : channelId.Trim();
         }
 
         public IEnumerator Send(BugReport report, Action<BugReportSendResult> completed)
         {
-            if (string.IsNullOrEmpty(webhookUrl))
+            if (string.IsNullOrEmpty(botToken) || string.IsNullOrEmpty(channelId))
             {
-                completed?.Invoke(BugReportSendResult.Fail("Slack Incoming Webhook URL is not configured."));
+                completed?.Invoke(BugReportSendResult.Fail("Configure both Slack Bot Token and Channel ID."));
                 yield break;
             }
 
-            var payload = "{\"text\":\"" + JsonEscape(BuildSlackMessage(report)) + "\"}";
-            using (var request = new UnityWebRequest(webhookUrl, UnityWebRequest.kHttpVerbPOST))
+            string parentMessageTs = null;
+            var postPayload = "{\"channel\":\"" + JsonEscape(channelId) + "\",\"text\":\"" + JsonEscape(BuildSlackMessage(report)) + "\"}";
+            using (var request = AuthorizedJsonRequest(PostMessageEndpoint, postPayload))
             {
-                request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(payload));
-                request.downloadHandler = new DownloadHandlerBuffer();
-                request.SetRequestHeader("Content-Type", "application/json; charset=utf-8");
-                request.timeout = 30;
                 yield return request.SendWebRequest();
-                if (request.result != UnityWebRequest.Result.Success)
+                var response = request.downloadHandler == null ? "" : request.downloadHandler.text;
+                var parsed = string.IsNullOrEmpty(response) ? null : JsonUtility.FromJson<SlackPostMessageResponse>(response);
+                if (request.result != UnityWebRequest.Result.Success || parsed == null || !parsed.ok || string.IsNullOrEmpty(parsed.ts))
                 {
-                    completed?.Invoke(BugReportSendResult.Fail("Slack webhook failed: " + RequestError(request)));
+                    var error = parsed != null && !string.IsNullOrEmpty(parsed.error) ? parsed.error : RequestError(request);
+                    if (parsed != null && !string.IsNullOrEmpty(parsed.needed))
+                    {
+                        error += " (needed: " + parsed.needed;
+                        if (!string.IsNullOrEmpty(parsed.provided))
+                            error += "; provided: " + parsed.provided;
+                        error += ")";
+                    }
+                    completed?.Invoke(BugReportSendResult.Fail("Slack could not create the report thread. Ensure the bot has chat:write and is in the channel: " + error));
                     yield break;
                 }
+                parentMessageTs = parsed.ts;
             }
 
             if (report.Attachments.Count == 0)
             {
                 completed?.Invoke(BugReportSendResult.Ok("Report sent to Slack."));
-                yield break;
-            }
-
-            if (string.IsNullOrEmpty(botToken) || string.IsNullOrEmpty(channelId))
-            {
-                completed?.Invoke(BugReportSendResult.Ok("Report text sent. Attachments were kept local because Slack Bot Token / Channel ID is not configured."));
                 yield break;
             }
 
@@ -79,7 +80,7 @@ namespace MacacaGames.RuntimeBugReporter
                 yield break;
             }
 
-            var completePayload = BuildCompleteUploadPayload(uploadedFiles, channelId, "Attachments for report " + report.Id);
+            var completePayload = BuildCompleteUploadPayload(uploadedFiles, channelId, parentMessageTs, "Attachments for report " + report.Id);
             using (var request = AuthorizedJsonRequest(CompleteUploadEndpoint, completePayload))
             {
                 yield return request.SendWebRequest();
@@ -159,7 +160,7 @@ namespace MacacaGames.RuntimeBugReporter
             return builder.ToString();
         }
 
-        private static string BuildCompleteUploadPayload(List<UploadedFile> files, string channel, string comment)
+        private static string BuildCompleteUploadPayload(List<UploadedFile> files, string channel, string threadTs, string comment)
         {
             var builder = new StringBuilder("{\"files\":[");
             for (var index = 0; index < files.Count; index++)
@@ -168,7 +169,8 @@ namespace MacacaGames.RuntimeBugReporter
                 builder.Append("{\"id\":\"").Append(JsonEscape(files[index].Id)).Append("\",\"title\":\"")
                     .Append(JsonEscape(files[index].Title)).Append("\"}");
             }
-            builder.Append("],\"channel_id\":\"").Append(JsonEscape(channel)).Append("\",\"initial_comment\":\"")
+            builder.Append("],\"channel_id\":\"").Append(JsonEscape(channel)).Append("\",\"thread_ts\":\"")
+                .Append(JsonEscape(threadTs)).Append("\",\"initial_comment\":\"")
                 .Append(JsonEscape(comment)).Append("\"}");
             return builder.ToString();
         }
@@ -205,6 +207,16 @@ namespace MacacaGames.RuntimeBugReporter
 
         [Serializable]
         private sealed class SlackBasicResponse { public bool ok; public string error; }
+        [Serializable]
+        private sealed class SlackPostMessageResponse
+        {
+            public bool ok;
+            public string error;
+            public string needed;
+            public string provided;
+            public string channel;
+            public string ts;
+        }
         [Serializable]
         private sealed class SlackUploadUrlResponse { public bool ok; public string upload_url; public string file_id; public string error; }
         private sealed class UploadedFile

@@ -389,12 +389,14 @@ namespace MacacaGames.RuntimeBugReporter
             statusIsError = false;
             status = "Sending report…";
             var report = BuildReport();
-            var transport = BugReporter.TransportOverride ?? new SlackBugReportTransport(settings.incomingWebhookUrl, settings.botToken, settings.channelId);
+            var transport = BugReporter.TransportOverride ?? new SlackBugReportTransport(settings.botToken, settings.channelId);
             BugReportSendResult result = default;
             yield return transport.Send(report, value => result = value);
             isSending = false;
             status = result.Message;
             statusIsError = !result.Success;
+            if (!result.Success)
+                Debug.LogError("[Macaca Beacon] " + result.Message);
             if (result.Success)
             {
                 yield return new WaitForSecondsRealtime(1.2f);

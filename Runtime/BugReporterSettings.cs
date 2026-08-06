@@ -20,11 +20,9 @@ namespace MacacaGames.RuntimeBugReporter
         [Range(0.45f, 0.9f)] public float desktopWidthRatio = 0.64f;
 
         [Header("Slack")]
-        [Tooltip("Slack Incoming Webhook URL. Keep this out of public builds; use a relay for untrusted clients.")]
-        public string incomingWebhookUrl = "";
-        [Tooltip("Optional Slack bot token with files:write. Required to upload screenshots and video directly to Slack.")]
+        [Tooltip("Slack bot token with chat:write and files:write. Used for both the report message and attachments.")]
         public string botToken = "";
-        [Tooltip("Channel ID used by the Slack file upload API, for example C0123456789.")]
+        [Tooltip("Channel ID where the bot posts reports, for example C0123456789.")]
         public string channelId = "";
 
         [Header("Capture")]
@@ -38,8 +36,8 @@ namespace MacacaGames.RuntimeBugReporter
         [Tooltip("Continuously keeps low-rate JPEG frames in memory. The report contains seconds before and after F6 as an MJPEG AVI.")]
         public bool enableRollingVideo = false;
         [Range(1, 15)] public int videoFramesPerSecond = 6;
-        [Range(1, 10)] public int secondsBefore = 5;
-        [Range(0, 10)] public int secondsAfter = 5;
+        [Range(1, 10)] public int secondsBefore = 8;
+        [Range(0, 10)] public int secondsAfter = 1;
         [Range(320, 1920)] public int videoWidth = 960;
         [Range(20, 90)] public int videoJpegQuality = 65;
         [Range(1, 100)] public int maximumAttachmentMegabytes = 25;

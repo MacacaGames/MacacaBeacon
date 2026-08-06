@@ -17,7 +17,7 @@ namespace MacacaGames.RuntimeBugReporter.Editor
             {
                 label = "Macaca Beacon",
                 guiHandler = _ => DrawSettings(),
-                keywords = new[] { "bug", "report", "slack", "webhook", "screenshot", "video", "F6" }
+                keywords = new[] { "bug", "report", "slack", "bot", "screenshot", "video", "F6" }
             };
         }
 
@@ -40,8 +40,8 @@ namespace MacacaGames.RuntimeBugReporter.Editor
 
             serializedSettings.Update();
             EditorGUILayout.Space(8);
-            EditorGUILayout.HelpBox("F6 opens the IMGUI reporter at runtime. Incoming Webhooks send the report message; Slack Bot credentials are additionally required for screenshot/video uploads.", MessageType.Info);
-            EditorGUILayout.HelpBox("Do not ship a Slack webhook or bot token in an untrusted public client. Put secrets behind a rate-limited relay service.", MessageType.Warning);
+            EditorGUILayout.HelpBox("F6 opens the IMGUI reporter at runtime. The Slack Bot sends both the report message and screenshot/video attachments into its thread.", MessageType.Info);
+            EditorGUILayout.HelpBox("Do not ship a Slack bot token in an untrusted public client. Put secrets behind a rate-limited relay service.", MessageType.Warning);
             EditorGUILayout.Space(8);
 
             var iterator = serializedSettings.GetIterator();
