@@ -1,8 +1,8 @@
 {
   "name": "com.macacagames.beacon",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "displayName": "Macaca Beacon",
-  "description": "Macaca Games' modular in-game issue beacon with an IMGUI form, screenshots, rolling MJPEG video, diagnostics, and Slack delivery.",
+  "description": "Macaca Games' modular in-game issue beacon with an IMGUI form, screenshots, rolling H.264 MP4 video on macOS, diagnostics, and Slack delivery.",
   "unity": "2021.3",
   "keywords": [
     "bug",
@@ -12,6 +12,13 @@
   ],
   "author": {
     "name": "Macaca Games"
+  },
+  "dependencies": {
+    "com.unity.modules.imageconversion": "1.0.0",
+    "com.unity.modules.imgui": "1.0.0",
+    "com.unity.modules.jsonserialize": "1.0.0",
+    "com.unity.modules.screencapture": "1.0.0",
+    "com.unity.modules.unitywebrequest": "1.0.0"
   },
   "samples": [
     {

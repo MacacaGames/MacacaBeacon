@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0] - 2026-08-07
+
+- Added a universal macOS native backend that finalizes rolling JPEG frames as H.264 MP4 using AVAssetWriter in Editor and Player builds.
+- Added MP4-first encoder selection with an optional managed MJPEG AVI fallback on unsupported or temporarily unavailable encoders.
+- Moved video finalization off the Unity main thread and preserved real capture timestamps and the requested incident duration.
+- Added file-backed report attachments and `UploadHandlerFile` streaming so videos no longer require a second full in-memory copy.
+- Local report staging now copies the completed video before Slack upload and retains it when delivery fails.
+- Added MP4 bitrate, MP4 preference, and legacy fallback settings.
+
 ## [0.1.0] - 2026-08-07
 
 - Initial Macaca Beacon embedded UPM package.

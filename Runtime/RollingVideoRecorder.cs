@@ -1,6 +1,8 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
+using System.Threading.Tasks;
 using UnityEngine;
 
 namespace MacacaGames.RuntimeBugReporter
@@ -9,12 +11,12 @@ namespace MacacaGames.RuntimeBugReporter
     {
         private readonly MonoBehaviour host;
         private readonly BugReporterSettings settings;
-        private readonly Queue<CapturedFrame> history = new Queue<CapturedFrame>();
-        private List<CapturedFrame> incidentFrames;
-        private Action<byte[]> incidentCompleted;
-        private float captureStartedTime;
-        private float incidentClipStartTime;
-        private float incidentEndTime;
+        private readonly Queue<VideoCaptureFrame> history = new Queue<VideoCaptureFrame>();
+        private List<VideoCaptureFrame> incidentFrames;
+        private Action<VideoCaptureResult> incidentCompleted;
+        private double captureStartedTime;
+        private double incidentClipStartTime;
+        private double incidentEndTime;
         private int capturedWidth;
         private int capturedHeight;
 
@@ -30,12 +32,12 @@ namespace MacacaGames.RuntimeBugReporter
         {
             if (settings.enableRollingVideo)
             {
-                captureStartedTime = Time.realtimeSinceStartup;
+                captureStartedTime = Time.realtimeSinceStartupAsDouble;
                 host.StartCoroutine(CaptureLoop());
             }
         }
 
-        public void MarkIncident(Action<byte[]> completed)
+        public void MarkIncident(Action<VideoCaptureResult> completed)
         {
             if (!settings.enableRollingVideo)
             {
@@ -43,14 +45,14 @@ namespace MacacaGames.RuntimeBugReporter
                 return;
             }
 
-            var incidentTime = Time.realtimeSinceStartup;
-            incidentFrames = new List<CapturedFrame>(history);
+            var incidentTime = Time.realtimeSinceStartupAsDouble;
+            incidentFrames = new List<VideoCaptureFrame>(history);
             incidentCompleted = completed;
-            incidentClipStartTime = Mathf.Max(captureStartedTime, incidentTime - settings.secondsBefore);
+            incidentClipStartTime = Math.Max(captureStartedTime, incidentTime - settings.secondsBefore);
             incidentEndTime = incidentTime + settings.secondsAfter;
-            IsFinalizing = settings.secondsAfter > 0;
-            if (!IsFinalizing)
-                FinishIncident();
+            IsFinalizing = true;
+            if (settings.secondsAfter <= 0)
+                BeginFinishIncident();
         }
 
         private IEnumerator CaptureLoop()
@@ -74,7 +76,7 @@ namespace MacacaGames.RuntimeBugReporter
                 capturedHeight = Mathf.RoundToInt(Screen.height * (capturedWidth / (float)Mathf.Max(1, Screen.width)));
                 capturedHeight -= capturedHeight % 2;
 
-                var capturedFrame = new CapturedFrame(frame, Time.realtimeSinceStartup);
+                var capturedFrame = new VideoCaptureFrame(frame, Time.realtimeSinceStartupAsDouble);
                 history.Enqueue(capturedFrame);
                 var historyCutoff = capturedFrame.CapturedAt - Mathf.Max(1, settings.secondsBefore);
                 while (history.Count > 0 && history.Peek().CapturedAt < historyCutoff)
@@ -85,44 +87,64 @@ namespace MacacaGames.RuntimeBugReporter
 
                 incidentFrames.Add(capturedFrame);
                 if (capturedFrame.CapturedAt >= incidentEndTime)
-                    FinishIncident();
+                    BeginFinishIncident();
             }
         }
 
-        private void FinishIncident()
+        private void BeginFinishIncident()
         {
+            if (incidentFrames == null)
+                return;
             var frames = incidentFrames;
             var completed = incidentCompleted;
             incidentFrames = null;
             incidentCompleted = null;
-            IsFinalizing = false;
-            byte[] result = null;
-            try
+            host.StartCoroutine(FinishIncident(frames, completed));
+        }
+
+        private IEnumerator FinishIncident(List<VideoCaptureFrame> frames, Action<VideoCaptureResult> completed)
+        {
+            var durationSeconds = Math.Max(1d / Math.Max(1, settings.videoFramesPerSecond), incidentEndTime - incidentClipStartTime);
+            var captureDirectory = Path.Combine(Application.temporaryCachePath, "MacacaBeacon", "Captures");
+            Directory.CreateDirectory(captureDirectory);
+            var outputStem = Path.Combine(captureDirectory, "incident-" + Guid.NewGuid().ToString("N"));
+            string encoderError = null;
+            var task = Task.Run(() => VideoEncoderBackend.Encode(
+                outputStem,
+                frames,
+                capturedWidth,
+                capturedHeight,
+                settings.videoFramesPerSecond,
+                settings.videoBitrateKbps,
+                durationSeconds,
+                settings.preferMp4,
+                settings.allowLegacyAviFallback,
+                out encoderError));
+
+            while (!task.IsCompleted)
+                yield return null;
+
+            VideoCaptureResult result = null;
+            if (task.IsFaulted)
             {
-                var jpegFrames = new List<byte[]>(frames.Count);
-                foreach (var frame in frames)
-                    jpegFrames.Add(frame.Data);
-                var durationSeconds = Mathf.Max(1f / Mathf.Max(1, settings.videoFramesPerSecond), incidentEndTime - incidentClipStartTime);
-                result = MjpegAviEncoder.Encode(jpegFrames, capturedWidth, capturedHeight, settings.videoFramesPerSecond, durationSeconds);
-                Debug.Log("[Macaca Beacon] Video finalized: " + jpegFrames.Count + " frames over " + durationSeconds.ToString("0.00") + " seconds.");
+                Debug.LogException(task.Exception);
             }
-            catch (Exception exception)
+            else
             {
-                Debug.LogException(exception);
+                result = task.Result;
+            }
+
+            IsFinalizing = false;
+            if (result == null)
+            {
+                Debug.LogWarning("[Macaca Beacon] Video finalization failed: " + (encoderError ?? "unknown encoder error"));
+            }
+            else
+            {
+                Debug.Log("[Macaca Beacon] Video finalized by " + result.EncoderName + ": " + result.FrameCount + " frames over " + result.DurationSeconds.ToString("0.00") + " seconds at " + result.FilePath);
             }
             completed?.Invoke(result);
         }
 
-        private readonly struct CapturedFrame
-        {
-            public readonly byte[] Data;
-            public readonly float CapturedAt;
-
-            public CapturedFrame(byte[] data, float capturedAt)
-            {
-                Data = data;
-                CapturedAt = capturedAt;
-            }
-        }
     }
 }

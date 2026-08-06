@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using UnityEngine;
@@ -20,20 +21,37 @@ namespace MacacaGames.RuntimeBugReporter
                 Directory.CreateDirectory(root);
                 directory = Path.Combine(root, report.CreatedUtc.ToString("yyyyMMdd-HHmmss") + "-" + SafeName(report.Id));
                 Directory.CreateDirectory(directory);
+                var stagedFiles = new List<StagedFile>();
 
                 File.WriteAllText(Path.Combine(directory, "report.txt"), BuildReportText(report), new UTF8Encoding(false));
                 for (var index = 0; index < report.Attachments.Count; index++)
                 {
                     var attachment = report.Attachments[index];
-                    if (attachment == null || attachment.Data == null || attachment.Data.Length == 0)
+                    if (attachment == null || attachment.Length <= 0)
                         continue;
                     var fileName = SafeName(attachment.FileName);
                     if (string.IsNullOrEmpty(fileName))
                         fileName = "attachment-" + (index + 1);
-                    File.WriteAllBytes(UniquePath(directory, fileName), attachment.Data);
+                    var stagedPath = UniquePath(directory, fileName);
+                    if (attachment.Data != null)
+                    {
+                        File.WriteAllBytes(stagedPath, attachment.Data);
+                    }
+                    else
+                    {
+                        File.Copy(attachment.FilePath, stagedPath, false);
+                        stagedFiles.Add(new StagedFile(attachment, attachment.FilePath, stagedPath, attachment.DeleteSourceAfterStaging));
+                    }
                 }
 
                 Prune(root, Mathf.Max(1, maximumRetainedReports), directory);
+                foreach (var stagedFile in stagedFiles)
+                {
+                    stagedFile.Attachment.FilePath = stagedFile.StagedPath;
+                    stagedFile.Attachment.DeleteSourceAfterStaging = false;
+                    if (stagedFile.DeleteSource)
+                        TryDeleteFile(stagedFile.SourcePath);
+                }
                 return true;
             }
             catch (Exception exception)
@@ -86,8 +104,38 @@ namespace MacacaGames.RuntimeBugReporter
             builder.AppendLine("Attachments");
             builder.AppendLine("-----------");
             foreach (var attachment in report.Attachments)
-                builder.AppendLine(attachment.FileName + " | " + attachment.MimeType + " | " + (attachment.Data == null ? 0 : attachment.Data.Length) + " bytes");
+                builder.AppendLine(attachment.FileName + " | " + attachment.MimeType + " | " + attachment.Length + " bytes");
             return builder.ToString();
+        }
+
+        private static void TryDeleteFile(string path)
+        {
+            if (string.IsNullOrEmpty(path) || !File.Exists(path))
+                return;
+            try
+            {
+                File.Delete(path);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("[Macaca Beacon] Could not remove temporary attachment: " + exception.Message);
+            }
+        }
+
+        private sealed class StagedFile
+        {
+            public readonly BugReportAttachment Attachment;
+            public readonly string SourcePath;
+            public readonly string StagedPath;
+            public readonly bool DeleteSource;
+
+            public StagedFile(BugReportAttachment attachment, string sourcePath, string stagedPath, bool deleteSource)
+            {
+                Attachment = attachment;
+                SourcePath = sourcePath;
+                StagedPath = stagedPath;
+                DeleteSource = deleteSource;
+            }
         }
 
         private static string SafeName(string value)

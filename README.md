@@ -35,17 +35,32 @@
 - 截圖上的選填畫筆標注
 - Product、version、build GUID、Unity、platform、OS、CPU、RAM、GPU、VRAM、resolution、scene
 - 有固定容量上限的 recent log ring buffer；Error／Exception 包含 stack trace
-- 選填 MJPEG AVI：預設 6 FPS、前 5 秒＋後 5 秒、無音訊
+- 選填影片：macOS 優先 H.264 MP4，預設 6 FPS、前 8 秒＋後 1 秒、無音訊
 
 表單內會顯示資料用途聲明；內容可由 Settings 自訂。請依發行地區及資料內容完成實際隱私／同意流程。
 
 ## 錄影限制
 
-`Enable Rolling Video` 預設關閉。啟用後會持續低頻擷取、縮圖及 JPEG encode，換取 Player build 也能保留事件發生前畫面。Unity Recorder 是 Editor-only，不能解決正式 Player 的回溯錄影，因此套件使用自帶 MJPEG AVI writer。建議先以目標硬體量測；行動裝置可降到 3 FPS / 640px，或改接平台原生錄影實作。
+`Enable Rolling Video` 預設關閉。啟用後會持續低頻擷取並保留帶有 realtime timestamp 的 JPEG frame ring buffer，換取 Player build 也能保留事件發生前畫面。Unity Recorder 是 Editor-only，不能解決正式 Player 的回溯錄影。
 
-每個 frame 會記錄 realtime timestamp，歷史緩衝依秒數而非 frame 數裁切，AVI 時基也依實際捕捉時長產生。裝置無法達到設定 FPS 時只會降低流暢度，不會再把 8 秒內容加速成較短影片。若 Play Mode／Player 啟動尚未滿 `Seconds Before`，則只能保留啟動後實際存在的歷史畫面。
+macOS Editor 與 macOS Standalone Player 會優先使用套件內的 Universal Binary（Apple Silicon + Intel）和 AVAssetWriter 產生 H.264 MP4，MIME type 為 `video/mp4`。影片在背景 thread 完成，先寫進 `Application.temporaryCachePath`，建立 report 時再交易式複製到 PendingReports，Slack 則使用 `UploadHandlerFile` 直接由檔案上傳，避免另一份完整影片常駐 managed heap。
 
-為避免記憶體／Slack 上傳失控，每個附件受 `Maximum Attachment Megabytes` 限制。影片不包含音訊，UI 在後 5 秒收集完成前會暫時停用 Send。
+`Prefer Mp4` 預設開啟。若目前平台尚無 MP4 backend，或 macOS 的 H.264 encoder 暫時不可用，`Allow Legacy Avi Fallback` 可讓回報退回純 C# MJPEG AVI，而不是整份報告失敗。目前正式 MP4 backend 支援矩陣：
+
+| 平台 | Runtime 影片輸出 |
+|---|---|
+| macOS Editor | H.264 MP4；可選 AVI fallback |
+| macOS Standalone (Intel / Apple Silicon) | H.264 MP4；可選 AVI fallback |
+| Windows / Linux / Android / iOS | 目前使用 AVI fallback；介面已保留平台 encoder 擴充點 |
+| WebGL | 建議停用 rolling video |
+
+macOS native source 位於 `Native~/macOS`，執行 `build.sh` 可重建 `Runtime/Plugins/macOS/MacacaBeaconVideo.bundle`。它只連結 Apple 系統 framework，沒有額外第三方 runtime dependency。
+
+其他平台可以實作 `IVideoEncoderBackend`，並在遊戲初始化時呼叫 `BugReporter.SetVideoEncoder(backend)`。Backend 會收到含 JPEG bytes 與 realtime timestamp 的唯讀 frame list，負責將結果寫到指定路徑；成功後套件會自動接手本地 staging、Slack 上傳與清理。
+
+每個 frame 會記錄 double precision realtime timestamp，歷史緩衝依秒數而非 frame 數裁切。MP4 使用各 frame 的實際 presentation timestamp，並將最後一幀延伸到設定的 incident end；AVI fallback 也依實際捕捉時長產生時基。裝置無法達到設定 FPS 時只會降低流暢度，不會再把 8 秒內容加速成較短影片。若 Play Mode／Player 啟動尚未滿 `Seconds Before`，則只能保留啟動後實際存在的歷史畫面。
+
+為避免記憶體／Slack 上傳失控，每個附件受 `Maximum Attachment Megabytes` 限制。影片不包含音訊，UI 在後段畫面收集與影片封裝完成前會暫時停用 Send。
 
 ## 本地失敗備援
 
@@ -79,7 +94,7 @@ BugReporter.RegisterDataProvider(new GameBugContext());
 "com.macacagames.beacon": "https://github.com/your-org/macaca-beacon.git?path=/com.macacagames.beacon#v0.1.0"
 ```
 
-套件 runtime assembly 沒有第三方相依；需要 Unity 的 IMGUI、UnityWebRequest、ScreenCapture 與 ImageConversion built-in modules。
+套件 managed runtime assembly 沒有第三方相依；需要 Unity 的 IMGUI、UnityWebRequest、ScreenCapture 與 ImageConversion built-in modules。macOS MP4 backend 另外使用系統內建的 AVFoundation、VideoToolbox、CoreMedia、CoreVideo、CoreGraphics 與 ImageIO frameworks。
 
 ## 參考
 

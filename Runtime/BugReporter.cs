@@ -8,6 +8,7 @@ namespace MacacaGames.RuntimeBugReporter
     {
         private static readonly List<IBugReportDataProvider> Providers = new List<IBugReportDataProvider>();
         internal static IBugReportTransport TransportOverride;
+        internal static IVideoEncoderBackend VideoEncoderOverride;
 
         public static bool IsOpen => BugReporterController.Instance != null && BugReporterController.Instance.IsOpen;
 
@@ -32,6 +33,12 @@ namespace MacacaGames.RuntimeBugReporter
         public static void UnregisterDataProvider(IBugReportDataProvider provider) => Providers.Remove(provider);
 
         public static void SetTransport(IBugReportTransport transport) => TransportOverride = transport;
+
+        /// <summary>
+        /// Registers a project-specific runtime encoder, for example a MediaCodec or Media Foundation backend.
+        /// Pass null to restore the package's platform default.
+        /// </summary>
+        public static void SetVideoEncoder(IVideoEncoderBackend encoder) => VideoEncoderOverride = encoder;
 
         internal static void CollectCustomData(BugReport report)
         {

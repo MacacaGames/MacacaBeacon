@@ -61,11 +61,11 @@ namespace MacacaGames.RuntimeBugReporter
             var uploadedFiles = new List<UploadedFile>();
             foreach (var attachment in report.Attachments)
             {
-                if (attachment.Data == null || attachment.Data.Length == 0)
+                if (attachment.Length <= 0)
                     continue;
                 UploadedFile uploaded = null;
                 string uploadError = null;
-                yield return UploadBytes(attachment, (file, error) => { uploaded = file; uploadError = error; });
+                yield return UploadAttachment(attachment, (file, error) => { uploaded = file; uploadError = error; });
                 if (uploaded == null)
                 {
                     completed?.Invoke(BugReportSendResult.Fail("Report text sent, but attachment upload failed: " + uploadError));
@@ -97,9 +97,9 @@ namespace MacacaGames.RuntimeBugReporter
             completed?.Invoke(BugReportSendResult.Ok("Report and " + uploadedFiles.Count + " attachment(s) sent to Slack."));
         }
 
-        private IEnumerator UploadBytes(BugReportAttachment attachment, Action<UploadedFile, string> completed)
+        private IEnumerator UploadAttachment(BugReportAttachment attachment, Action<UploadedFile, string> completed)
         {
-            var form = "filename=" + UnityWebRequest.EscapeURL(attachment.FileName) + "&length=" + attachment.Data.Length;
+            var form = "filename=" + UnityWebRequest.EscapeURL(attachment.FileName) + "&length=" + attachment.Length;
             using (var request = new UnityWebRequest(UploadUrlEndpoint, UnityWebRequest.kHttpVerbPOST))
             {
                 request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(form));
@@ -118,7 +118,9 @@ namespace MacacaGames.RuntimeBugReporter
 
                 using (var upload = new UnityWebRequest(parsed.upload_url, UnityWebRequest.kHttpVerbPOST))
                 {
-                    upload.uploadHandler = new UploadHandlerRaw(attachment.Data);
+                    upload.uploadHandler = attachment.Data != null
+                        ? (UploadHandler)new UploadHandlerRaw(attachment.Data)
+                        : new UploadHandlerFile(attachment.FilePath);
                     upload.downloadHandler = new DownloadHandlerBuffer();
                     upload.SetRequestHeader("Content-Type", string.IsNullOrEmpty(attachment.MimeType) ? "application/octet-stream" : attachment.MimeType);
                     upload.timeout = 60;

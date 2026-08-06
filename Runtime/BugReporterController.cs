@@ -18,7 +18,7 @@ namespace MacacaGames.RuntimeBugReporter
         private RecentLogCollector logs;
         private RollingVideoRecorder videoRecorder;
         private byte[] screenshotBytes;
-        private byte[] videoBytes;
+        private VideoCaptureResult videoCapture;
         private Texture2D screenshotPreview;
         private ScreenshotAnnotator screenshotAnnotator;
         private int annotationColorIndex;
@@ -76,6 +76,8 @@ namespace MacacaGames.RuntimeBugReporter
             if (!IsOpen || isSending)
                 return;
             IsOpen = false;
+            videoCapture?.DeleteFile();
+            videoCapture = null;
             Cursor.lockState = previousCursorLock;
             Cursor.visible = previousCursorVisible;
             status = "";
@@ -104,9 +106,25 @@ namespace MacacaGames.RuntimeBugReporter
             isOpening = true;
             status = "Capturing context…";
             screenshotBytes = null;
-            videoBytes = null;
+            videoCapture?.DeleteFile();
+            videoCapture = null;
             screenshotAnnotator = null;
-            videoRecorder.MarkIncident(bytes => videoBytes = bytes);
+            videoRecorder.MarkIncident(result =>
+            {
+                if (!IsOpen && !isOpening)
+                {
+                    result?.DeleteFile();
+                    return;
+                }
+                videoCapture = result;
+                if (IsOpen)
+                {
+                    statusIsError = result == null;
+                    status = result == null
+                        ? "Video could not be finalized. The report can still be sent without it."
+                        : result.Extension.TrimStart('.').ToUpperInvariant() + " video ready (" + result.DurationSeconds.ToString("0.0") + "s).";
+                }
+            });
 
             if (settings.includeScreenshot)
             {
@@ -414,7 +432,7 @@ namespace MacacaGames.RuntimeBugReporter
             var screenshotState = settings.includeScreenshot && screenshotBytes != null
                 ? screenshotAnnotator != null && screenshotAnnotator.HasAnnotations ? "[READY] Screenshot + annotations" : "[READY] Screenshot"
                 : "[OFF] Screenshot";
-            var videoState = !settings.enableRollingVideo ? "[OFF] Video" : videoRecorder.IsFinalizing ? "[WAIT] Video recording" : videoBytes != null ? "[READY] Video" : "[OFF] Video unavailable";
+            var videoState = !settings.enableRollingVideo ? "[OFF] Video" : videoRecorder.IsFinalizing ? "[WAIT] Video recording" : videoCapture != null ? "[READY] " + videoCapture.Extension.TrimStart('.').ToUpperInvariant() + " video" : "[OFF] Video unavailable";
             var logState = settings.includeRecentLogs ? "[READY] Recent logs" : "[OFF] Recent logs";
             GUILayout.Label(screenshotState + "\n" + videoState + "\n" + logState, hintStyle);
         }
@@ -555,8 +573,17 @@ namespace MacacaGames.RuntimeBugReporter
                     : screenshotBytes;
                 AddAttachmentIfAllowed(report, new BugReportAttachment("bug-" + report.Id + ".png", "image/png", finalScreenshot, "Game screenshot at report time with optional annotations"));
             }
-            if (settings.enableRollingVideo && videoBytes != null)
-                AddAttachmentIfAllowed(report, new BugReportAttachment("bug-" + report.Id + ".avi", "video/x-msvideo", videoBytes, "Gameplay around report time"));
+            if (settings.enableRollingVideo && videoCapture != null)
+            {
+                var videoAttachment = BugReportAttachment.FromFile(
+                    "bug-" + report.Id + videoCapture.Extension,
+                    videoCapture.MimeType,
+                    videoCapture.FilePath,
+                    "Gameplay around report time");
+                videoAttachment.DeleteSourceAfterStaging = true;
+                AddAttachmentIfAllowed(report, videoAttachment);
+                report.Fields["Video"] = videoCapture.EncoderName + ", " + videoCapture.DurationSeconds.ToString("0.00") + "s, " + videoCapture.FrameCount + " captured frames";
+            }
             if (settings.includeDiagnostics || settings.includeRecentLogs)
             {
                 var diagnostics = BuildDiagnostics();
@@ -569,10 +596,17 @@ namespace MacacaGames.RuntimeBugReporter
         private void AddAttachmentIfAllowed(BugReport report, BugReportAttachment attachment)
         {
             var maximumBytes = settings.maximumAttachmentMegabytes * 1024L * 1024L;
-            if (attachment.Data != null && attachment.Data.LongLength <= maximumBytes)
+            if (attachment.Length > 0 && attachment.Length <= maximumBytes)
                 report.Attachments.Add(attachment);
             else
+            {
                 Debug.LogWarning("Macaca Beacon skipped oversized attachment: " + attachment.FileName);
+                if (attachment.DeleteSourceAfterStaging && !string.IsNullOrEmpty(attachment.FilePath))
+                {
+                    try { System.IO.File.Delete(attachment.FilePath); }
+                    catch (Exception exception) { Debug.LogWarning("Macaca Beacon could not clean up skipped attachment: " + exception.Message); }
+                }
+            }
         }
 
         private string BuildDiagnostics()

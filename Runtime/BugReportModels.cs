@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 
 namespace MacacaGames.RuntimeBugReporter
 {
@@ -20,7 +21,21 @@ namespace MacacaGames.RuntimeBugReporter
         public string FileName;
         public string MimeType;
         public byte[] Data;
+        public string FilePath;
         public string AltText;
+        internal bool DeleteSourceAfterStaging;
+
+        public long Length
+        {
+            get
+            {
+                if (Data != null)
+                    return Data.LongLength;
+                if (!string.IsNullOrEmpty(FilePath) && File.Exists(FilePath))
+                    return new FileInfo(FilePath).Length;
+                return 0;
+            }
+        }
 
         public BugReportAttachment(string fileName, string mimeType, byte[] data, string altText = "")
         {
@@ -28,6 +43,14 @@ namespace MacacaGames.RuntimeBugReporter
             MimeType = mimeType;
             Data = data;
             AltText = altText;
+        }
+
+        public static BugReportAttachment FromFile(string fileName, string mimeType, string filePath, string altText = "")
+        {
+            return new BugReportAttachment(fileName, mimeType, null, altText)
+            {
+                FilePath = filePath
+            };
         }
     }
 
