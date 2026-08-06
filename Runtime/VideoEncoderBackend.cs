@@ -45,7 +45,7 @@ namespace MacacaGames.RuntimeBugReporter
                     TryDelete(customOutputPath);
                 }
 
-                var mp4 = new MacOsH264Mp4Encoder();
+                var mp4 = CreatePlatformMp4Encoder();
                 if (mp4.IsAvailable)
                 {
                     var outputPath = outputStem + mp4.Extension;
@@ -83,6 +83,15 @@ namespace MacacaGames.RuntimeBugReporter
                 error = "Legacy AVI fallback failed: " + exception.Message;
                 return null;
             }
+        }
+
+        private static IVideoEncoderBackend CreatePlatformMp4Encoder()
+        {
+#if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
+            return new WindowsMediaFoundationMp4Encoder();
+#else
+            return new MacOsH264Mp4Encoder();
+#endif
         }
 
         private static void TryDelete(string path)

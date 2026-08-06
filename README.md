@@ -35,7 +35,7 @@
 - 截圖上的選填畫筆標注
 - Product、version、build GUID、Unity、platform、OS、CPU、RAM、GPU、VRAM、resolution、scene
 - 有固定容量上限的 recent log ring buffer；Error／Exception 包含 stack trace
-- 選填影片：macOS 優先 H.264 MP4，預設 6 FPS、前 8 秒＋後 1 秒、無音訊
+- 選填影片：macOS／Windows 優先 H.264 MP4，預設 6 FPS、前 8 秒＋後 1 秒、無音訊
 
 表單內會顯示資料用途聲明；內容可由 Settings 自訂。請依發行地區及資料內容完成實際隱私／同意流程。
 
@@ -43,7 +43,9 @@
 
 `Enable Rolling Video` 預設關閉。啟用後會持續低頻擷取並保留帶有 realtime timestamp 的 JPEG frame ring buffer，換取 Player build 也能保留事件發生前畫面。Unity Recorder 是 Editor-only，不能解決正式 Player 的回溯錄影。
 
-macOS Editor 與 macOS Standalone Player 會優先使用套件內的 Universal Binary（Apple Silicon + Intel）和 AVAssetWriter 產生 H.264 MP4，MIME type 為 `video/mp4`。影片在背景 thread 完成，先寫進 `Application.temporaryCachePath`，建立 report 時再交易式複製到 PendingReports，Slack 則使用 `UploadHandlerFile` 直接由檔案上傳，避免另一份完整影片常駐 managed heap。
+macOS Editor／Standalone Player 使用套件內的 Universal Binary（Apple Silicon + Intel）和 AVAssetWriter 產生 H.264 MP4。Windows Editor／64-bit Standalone Player 使用 Windows 內建 Media Foundation H.264 encoder，並以 WIC 解碼 rolling JPEG frame；不需要 ffmpeg 或隨 Player 安裝額外 codec。兩者的 MIME type 都是 `video/mp4`，且會把 MP4 metadata 寫在 media data 前面，方便 Slack／瀏覽器提早建立預覽。
+
+影片在背景 thread 完成，先寫進 `Application.temporaryCachePath`，建立 report 時再交易式複製到 PendingReports，Slack 則使用 `UploadHandlerFile` 直接由檔案上傳，避免另一份完整影片常駐 managed heap。
 
 `Prefer Mp4` 預設開啟。若目前平台尚無 MP4 backend，或 macOS 的 H.264 encoder 暫時不可用，`Allow Legacy Avi Fallback` 可讓回報退回純 C# MJPEG AVI，而不是整份報告失敗。目前正式 MP4 backend 支援矩陣：
 
@@ -51,10 +53,14 @@ macOS Editor 與 macOS Standalone Player 會優先使用套件內的 Universal B
 |---|---|
 | macOS Editor | H.264 MP4；可選 AVI fallback |
 | macOS Standalone (Intel / Apple Silicon) | H.264 MP4；可選 AVI fallback |
-| Windows / Linux / Android / iOS | 目前使用 AVI fallback；介面已保留平台 encoder 擴充點 |
+| Windows Editor (x64) | H.264 MP4；可選 AVI fallback |
+| Windows Standalone (x64) | H.264 MP4；可選 AVI fallback |
+| Linux / Android / iOS | 目前使用 AVI fallback；介面已保留平台 encoder 擴充點 |
 | WebGL | 建議停用 rolling video |
 
 macOS native source 位於 `Native~/macOS`，執行 `build.sh` 可重建 `Runtime/Plugins/macOS/MacacaBeaconVideo.bundle`。它只連結 Apple 系統 framework，沒有額外第三方 runtime dependency。
+
+Windows native source 位於 `Native~/Windows`。在裝有 Visual Studio 2022「Desktop development with C++」與 Windows 10/11 SDK 的 Windows 主機執行 `build.ps1`，即可重建 `Runtime/Plugins/Windows/x86_64/MacacaBeaconVideoWindows.dll`；macOS package 維護者也可安裝 MinGW-w64 後執行 `build-cross.sh`。正式支援 Windows 10/11 x64；32-bit Windows、UWP 與 ARM64 目前不在 PluginImporter 支援範圍。
 
 其他平台可以實作 `IVideoEncoderBackend`，並在遊戲初始化時呼叫 `BugReporter.SetVideoEncoder(backend)`。Backend 會收到含 JPEG bytes 與 realtime timestamp 的唯讀 frame list，負責將結果寫到指定路徑；成功後套件會自動接手本地 staging、Slack 上傳與清理。
 
@@ -94,7 +100,7 @@ BugReporter.RegisterDataProvider(new GameBugContext());
 "com.macacagames.beacon": "https://github.com/your-org/macaca-beacon.git?path=/com.macacagames.beacon#v0.1.0"
 ```
 
-套件 managed runtime assembly 沒有第三方相依；需要 Unity 的 IMGUI、UnityWebRequest、ScreenCapture 與 ImageConversion built-in modules。macOS MP4 backend 另外使用系統內建的 AVFoundation、VideoToolbox、CoreMedia、CoreVideo、CoreGraphics 與 ImageIO frameworks。
+套件 managed runtime assembly 沒有第三方相依；需要 Unity 的 IMGUI、UnityWebRequest、ScreenCapture 與 ImageConversion built-in modules。macOS MP4 backend 使用系統內建的 AVFoundation、VideoToolbox、CoreMedia、CoreVideo、CoreGraphics 與 ImageIO frameworks；Windows MP4 backend 使用系統內建的 Media Foundation、Windows Imaging Component 與 COM。
 
 ## 參考
 

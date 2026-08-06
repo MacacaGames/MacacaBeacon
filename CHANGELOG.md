@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.0] - 2026-08-07
+
+- Added a Windows x64 Media Foundation backend that encodes rolling JPEG frames as H.264 MP4 in the Windows Editor and Standalone Player.
+- Added native WIC JPEG decoding, real presentation timestamps, and an incident-boundary hold frame to preserve requested video duration.
+- Added a Visual Studio 2022 rebuild script and Windows-only Unity plugin import settings; the Player does not require ffmpeg or a third-party codec runtime.
+
 ## [0.2.0] - 2026-08-07
 
 - Added a universal macOS native backend that finalizes rolling JPEG frames as H.264 MP4 using AVAssetWriter in Editor and Player builds.
