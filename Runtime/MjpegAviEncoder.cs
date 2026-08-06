@@ -7,10 +7,23 @@ namespace MacacaGames.RuntimeBugReporter
 {
     internal static class MjpegAviEncoder
     {
-        public static byte[] Encode(IReadOnlyList<byte[]> jpegFrames, int width, int height, int framesPerSecond)
+        public static byte[] Encode(IReadOnlyList<byte[]> jpegFrames, int width, int height, int framesPerSecond, float durationSeconds = 0f)
         {
             if (jpegFrames == null || jpegFrames.Count == 0)
                 return null;
+
+            var validFrameCount = 0;
+            foreach (var frame in jpegFrames)
+            {
+                if (frame != null && frame.Length > 0)
+                    validFrameCount++;
+            }
+            if (validFrameCount == 0)
+                return null;
+
+            var fallbackDuration = validFrameCount / (double)Math.Max(1, framesPerSecond);
+            var playbackDuration = durationSeconds > 0f ? durationSeconds : fallbackDuration;
+            var microsecondsPerFrame = Math.Max(1, (int)Math.Round(playbackDuration * 1000000d / validFrameCount));
 
             using (var stream = new MemoryStream())
             using (var writer = new BinaryWriter(stream, Encoding.ASCII, true))
@@ -30,11 +43,11 @@ namespace MacacaGames.RuntimeBugReporter
                 var maxFrameSize = 0;
                 foreach (var frame in jpegFrames)
                     maxFrameSize = Math.Max(maxFrameSize, frame == null ? 0 : frame.Length);
-                writer.Write(1000000 / Math.Max(1, framesPerSecond));
-                writer.Write(maxFrameSize * Math.Max(1, framesPerSecond));
+                writer.Write(microsecondsPerFrame);
+                writer.Write((int)Math.Min(int.MaxValue, Math.Ceiling(maxFrameSize * (1000000d / microsecondsPerFrame))));
                 writer.Write(0);
                 writer.Write(0x10);
-                writer.Write(jpegFrames.Count);
+                writer.Write(validFrameCount);
                 writer.Write(0);
                 writer.Write(1);
                 writer.Write(maxFrameSize);
@@ -54,10 +67,10 @@ namespace MacacaGames.RuntimeBugReporter
                 writer.Write((short)0);
                 writer.Write((short)0);
                 writer.Write(0);
-                writer.Write(1);
-                writer.Write(Math.Max(1, framesPerSecond));
+                writer.Write(microsecondsPerFrame);
+                writer.Write(1000000);
                 writer.Write(0);
-                writer.Write(jpegFrames.Count);
+                writer.Write(validFrameCount);
                 writer.Write(maxFrameSize);
                 writer.Write(-1);
                 writer.Write(0);
@@ -82,7 +95,7 @@ namespace MacacaGames.RuntimeBugReporter
                 var movieListSizePosition = stream.Position;
                 writer.Write(0);
                 WriteFourCc(writer, "movi");
-                var index = new List<IndexEntry>(jpegFrames.Count);
+                var index = new List<IndexEntry>(validFrameCount);
                 var movieDataStart = stream.Position;
                 foreach (var frame in jpegFrames)
                 {

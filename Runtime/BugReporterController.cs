@@ -389,16 +389,32 @@ namespace MacacaGames.RuntimeBugReporter
             statusIsError = false;
             status = "Sending report…";
             var report = BuildReport();
+            string localArchivePath = null;
+            string localArchiveError = null;
+            if (settings.saveFailedReportsLocally && !LocalReportArchive.TryStage(report, settings.maximumRetainedLocalReports, out localArchivePath, out localArchiveError))
+                Debug.LogError("[Macaca Beacon] Could not stage local report backup: " + localArchiveError);
             var transport = BugReporter.TransportOverride ?? new SlackBugReportTransport(settings.botToken, settings.channelId);
-            BugReportSendResult result = default;
+            var result = BugReportSendResult.Fail("The report transport ended without returning a result.");
             yield return transport.Send(report, value => result = value);
             isSending = false;
             status = result.Message;
             statusIsError = !result.Success;
             if (!result.Success)
+            {
+                if (!string.IsNullOrEmpty(localArchivePath))
+                {
+                    LocalReportArchive.MarkFailed(localArchivePath, result.Message);
+                    status += "\nSaved locally: " + localArchivePath;
+                }
+                else if (settings.saveFailedReportsLocally)
+                {
+                    status += "\nLocal backup also failed: " + localArchiveError;
+                }
                 Debug.LogError("[Macaca Beacon] " + result.Message);
+            }
             if (result.Success)
             {
+                LocalReportArchive.Discard(localArchivePath);
                 yield return new WaitForSecondsRealtime(1.2f);
                 Close();
                 title = "";

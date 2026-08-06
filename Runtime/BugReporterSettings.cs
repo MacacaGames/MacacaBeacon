@@ -42,6 +42,11 @@ namespace MacacaGames.RuntimeBugReporter
         [Range(20, 90)] public int videoJpegQuality = 65;
         [Range(1, 100)] public int maximumAttachmentMegabytes = 25;
 
+        [Header("Local fallback")]
+        [Tooltip("Stage every report locally before upload. Successful reports are removed; failed reports remain for manual upload.")]
+        public bool saveFailedReportsLocally = true;
+        [Range(1, 100)] public int maximumRetainedLocalReports = 20;
+
         [Header("Form")]
         public string reportTitle = "MACACA BEACON";
         public string privacyNotice = "This report sends your description, screenshot, recent logs, and device diagnostics to the development team for debugging only.";

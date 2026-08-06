@@ -40,7 +40,13 @@
 
 `Enable Rolling Video` 預設關閉。啟用後會持續低頻擷取、縮圖及 JPEG encode，換取 Player build 也能保留事件發生前畫面。Unity Recorder 是 Editor-only，不能解決正式 Player 的回溯錄影，因此套件使用自帶 MJPEG AVI writer。建議先以目標硬體量測；行動裝置可降到 3 FPS / 640px，或改接平台原生錄影實作。
 
+每個 frame 會記錄 realtime timestamp，歷史緩衝依秒數而非 frame 數裁切，AVI 時基也依實際捕捉時長產生。裝置無法達到設定 FPS 時只會降低流暢度，不會再把 8 秒內容加速成較短影片。若 Play Mode／Player 啟動尚未滿 `Seconds Before`，則只能保留啟動後實際存在的歷史畫面。
+
 為避免記憶體／Slack 上傳失控，每個附件受 `Maximum Attachment Megabytes` 限制。影片不包含音訊，UI 在後 5 秒收集完成前會暫時停用 Send。
+
+## 本地失敗備援
+
+`Save Failed Reports Locally` 預設開啟。送出時會先將 `report.txt`、截圖、影片與 diagnostics 暫存到 `Application.persistentDataPath/MacacaBeacon/PendingReports`；Slack 全部成功後才刪除該資料夾。任何訊息／附件上傳失敗或程式在傳輸途中關閉，檔案都會保留供事後手動上傳，UI 與 Unity Console 會顯示實際路徑。預設只保留最近 20 份，可用 `Maximum Retained Local Reports` 調整。
 
 ## 自訂遊戲資料
 
