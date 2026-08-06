@@ -333,17 +333,26 @@ namespace MacacaGames.RuntimeBugReporter
 
         private void DrawAnnotationToolbar()
         {
+            var compact = windowRect.width < 900f;
+            if (compact)
+            {
+                GUILayout.Label("DRAW ON THE SCREENSHOT", labelStyle);
+                GUILayout.Space(6 * styleScale);
+            }
             GUILayout.BeginHorizontal();
-            GUILayout.Label("DRAW ON THE SCREENSHOT", labelStyle);
-            GUILayout.FlexibleSpace();
+            if (!compact)
+            {
+                GUILayout.Label("DRAW ON THE SCREENSHOT", labelStyle);
+                GUILayout.FlexibleSpace();
+            }
             GUI.enabled = screenshotAnnotator != null && screenshotAnnotator.CanUndo;
-            if (GUILayout.Button("UNDO", buttonStyle, GUILayout.Width(96 * styleScale), GUILayout.Height(44 * styleScale)))
+            if (GUILayout.Button("UNDO", buttonStyle, compact ? GUILayout.ExpandWidth(true) : GUILayout.Width(96 * styleScale), GUILayout.Height(44 * styleScale)))
                 screenshotAnnotator.Undo();
             GUI.enabled = screenshotAnnotator != null && screenshotAnnotator.HasAnnotations;
-            if (GUILayout.Button("CLEAR", buttonStyle, GUILayout.Width(96 * styleScale), GUILayout.Height(44 * styleScale)))
+            if (GUILayout.Button("CLEAR", buttonStyle, compact ? GUILayout.ExpandWidth(true) : GUILayout.Width(96 * styleScale), GUILayout.Height(44 * styleScale)))
                 screenshotAnnotator.Clear();
             GUI.enabled = true;
-            if (GUILayout.Button("DONE", primaryButtonStyle, GUILayout.Width(96 * styleScale), GUILayout.Height(44 * styleScale)))
+            if (GUILayout.Button("DONE", primaryButtonStyle, compact ? GUILayout.ExpandWidth(true) : GUILayout.Width(96 * styleScale), GUILayout.Height(44 * styleScale)))
             {
                 screenshotAnnotator?.EndStroke();
                 isAnnotatingScreenshot = false;
@@ -351,11 +360,20 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.EndHorizontal();
             GUILayout.Space(8 * styleScale);
 
-            GUILayout.BeginHorizontal();
-            annotationColorIndex = GUILayout.SelectionGrid(annotationColorIndex, AnnotationColorLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
-            GUILayout.Space(10 * styleScale);
-            annotationSizeIndex = GUILayout.SelectionGrid(annotationSizeIndex, AnnotationSizeLabels, 3, categoryStyle, GUILayout.Width(210 * styleScale), GUILayout.Height(44 * styleScale));
-            GUILayout.EndHorizontal();
+            if (compact)
+            {
+                annotationColorIndex = GUILayout.SelectionGrid(annotationColorIndex, AnnotationColorLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
+                GUILayout.Space(8 * styleScale);
+                annotationSizeIndex = GUILayout.SelectionGrid(annotationSizeIndex, AnnotationSizeLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
+            }
+            else
+            {
+                GUILayout.BeginHorizontal();
+                annotationColorIndex = GUILayout.SelectionGrid(annotationColorIndex, AnnotationColorLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
+                GUILayout.Space(10 * styleScale);
+                annotationSizeIndex = GUILayout.SelectionGrid(annotationSizeIndex, AnnotationSizeLabels, 3, categoryStyle, GUILayout.Width(210 * styleScale), GUILayout.Height(44 * styleScale));
+                GUILayout.EndHorizontal();
+            }
         }
 
         private void HandleScreenshotAnnotation(Rect imageRect)
@@ -417,7 +435,9 @@ namespace MacacaGames.RuntimeBugReporter
         private void DrawCaptureSummary()
         {
             DrawLabel("REPORT CONTENTS");
-            var screenshotState = settings.includeScreenshot && screenshotBytes != null ? "[READY] Screenshot" : "[OFF] Screenshot";
+            var screenshotState = settings.includeScreenshot && screenshotBytes != null
+                ? screenshotAnnotator != null && screenshotAnnotator.HasAnnotations ? "[READY] Screenshot + annotations" : "[READY] Screenshot"
+                : "[OFF] Screenshot";
             var videoState = !settings.enableRollingVideo ? "[OFF] Video" : videoRecorder.IsFinalizing ? "[WAIT] Video recording" : videoBytes != null ? "[READY] Video" : "[OFF] Video unavailable";
             var logState = settings.includeRecentLogs ? "[READY] Recent logs" : "[OFF] Recent logs";
             GUILayout.Label(screenshotState + "\n" + videoState + "\n" + logState, hintStyle);

@@ -4,6 +4,8 @@
 
 遊戲內、可抽離為 UPM 的 Bug Report 工具。它使用 **IMGUI**（不依賴 UGUI），可用 F6 開啟，收集截圖、最近 log、裝置／build／場景資訊，並送到 Slack。
 
+截圖預覽提供內建標注畫筆。按 `ANNOTATE` 後可直接在圖片上繪製，支援紅／黃／青三色、三種筆刷粗細、Undo、可復原的 Clear，以及重新截圖。完成的筆跡會合成進 Slack 與本地失敗備援所使用的 PNG。
+
 ## 專案內啟用
 
 這個 repository 已將套件放在 `Packages/com.macacagames.beacon`，Unity 會把它視為 embedded package。進入 Play Mode 後直接按 **F6** 即可開啟；不需要在 Scene 放 prefab。
@@ -30,6 +32,7 @@
 
 - 使用者輸入：分類、標題、描述、選填聯絡資訊
 - PNG 截圖（按 F6 後、面板出現前擷取）
+- 截圖上的選填畫筆標注
 - Product、version、build GUID、Unity、platform、OS、CPU、RAM、GPU、VRAM、resolution、scene
 - 有固定容量上限的 recent log ring buffer；Error／Exception 包含 stack trace
 - 選填 MJPEG AVI：預設 6 FPS、前 5 秒＋後 5 秒、無音訊
