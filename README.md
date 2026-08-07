@@ -94,7 +94,54 @@ BugReporter.RegisterDataProvider(new GameBugContext());
 
 ## 分享至其他專案
 
-將 `com.macacagames.beacon` 資料夾放到獨立 Git repository 後，其他 Unity 專案可在 `Packages/manifest.json` 加入：
+### 方式 A：以 Git submodule 匯入（推薦內部／多專案共用）
+
+在 Unity 專案的 repository 根目錄執行：
+
+```bash
+git submodule add https://github.com/MacacaGames/MacacaBeacon.git Packages/com.macacagames.beacon
+git submodule update --init --recursive
+```
+
+如果公司 Git 只允許 SSH，也可以使用：
+
+```bash
+git submodule add git@github.com:MacacaGames/MacacaBeacon.git Packages/com.macacagames.beacon
+```
+
+確認 `Packages/com.macacagames.beacon/package.json` 存在後，回到 Unity 開啟／重新載入專案即可。這種方式會在主專案留下 `.gitmodules` 與一個 submodule commit 指標；請把兩者一起提交：
+
+```bash
+git add .gitmodules Packages/com.macacagames.beacon
+git commit -m "Add Macaca Beacon package"
+```
+
+其他人第一次 clone 主專案時，使用：
+
+```bash
+git clone --recurse-submodules <your-game-repository-url>
+```
+
+若已經 clone 但資料夾是空的，執行：
+
+```bash
+git submodule update --init --recursive
+```
+
+要更新套件版本時，先在 submodule 取得指定 tag 或 commit，再把主專案的 submodule 指標提交：
+
+```bash
+git -C Packages/com.macacagames.beacon fetch --tags origin
+git -C Packages/com.macacagames.beacon checkout v0.3.0
+git add Packages/com.macacagames.beacon
+git commit -m "Update Macaca Beacon"
+```
+
+`checkout` 後 submodule 顯示 detached HEAD 是正常的；版本由主專案記錄的 commit 決定。若要在套件 repository 內開發，先切換到自己的 branch，完成後再回主專案提交新的 submodule 指標。
+
+### 方式 B：以 UPM Git URL 匯入
+
+將 `com.macacagames.beacon` 保持在獨立 Git repository 後，其他 Unity 專案也可在 `Packages/manifest.json` 加入：
 
 ```json
 "com.macacagames.beacon": "https://github.com/your-org/macaca-beacon.git?path=/com.macacagames.beacon#v0.1.0"
