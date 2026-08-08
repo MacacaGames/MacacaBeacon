@@ -39,14 +39,7 @@ namespace MacacaGames.RuntimeBugReporter
                         var raw = request.GetData<byte>();
                         EnsureReadbackBuffers(raw.Length, width * 4);
                         raw.CopyTo(readbackBuffer);
-                        // Android's CaptureScreenshotIntoRenderTexture readback
-                        // is bottom-up even when the graphics UV origin is top.
-                        // Keep the platform correction separate from video's
-                        // backend-specific texture orientation.
-#if UNITY_ANDROID && !UNITY_EDITOR
-                        EnsureRowSwapBuffer(width * 4);
-                        FlipRowsInPlace(readbackBuffer, rowSwapBuffer, width, height, 4);
-#elif !UNITY_ANDROID || UNITY_EDITOR
+#if !UNITY_ANDROID || UNITY_EDITOR
                         if (!SystemInfo.graphicsUVStartsAtTop)
                         {
                             EnsureRowSwapBuffer(width * 4);

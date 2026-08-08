@@ -13,14 +13,15 @@ namespace MacacaGames.RuntimeBugReporter
             get
             {
 #if UNITY_ANDROID && !UNITY_EDITOR
-                if (SystemInfo.graphicsDeviceType != GraphicsDeviceType.Vulkan)
-                    return false;
+                if (SystemInfo.graphicsDeviceType != GraphicsDeviceType.OpenGLES3 &&
+                    SystemInfo.graphicsDeviceType != GraphicsDeviceType.Vulkan)
+                return false;
                 try
                 {
                     var available = NativeGetRenderEventFunc() != IntPtr.Zero;
                     if (available && !loggedBackend)
                     {
-                        Debug.Log("[Macaca Beacon] Android GPU video backend: Vulkan");
+                        Debug.Log("[Macaca Beacon] Android GPU video backend: " + SystemInfo.graphicsDeviceType);
                         loggedBackend = true;
                     }
                     return available;

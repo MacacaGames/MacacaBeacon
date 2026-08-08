@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace MacacaGames.RuntimeBugReporter
 {
@@ -60,6 +61,7 @@ namespace MacacaGames.RuntimeBugReporter
         private GUIStyle mobileEntryStyle;
         private float mobileGestureStartedAt = -1f;
         private bool mobileGestureTriggered;
+        private GameObject inputBlocker;
 
         // The two-column layout needs more room than its old 900 px cutoff
         // suggests: the screenshot card, form card, gutters, and card padding
@@ -88,6 +90,7 @@ namespace MacacaGames.RuntimeBugReporter
             if (!IsOpen || isSending)
                 return;
             IsOpen = false;
+            SetInputBlocker(false);
             videoCapture?.DeleteFile();
             videoCapture = null;
             Cursor.lockState = previousCursorLock;
@@ -115,6 +118,8 @@ namespace MacacaGames.RuntimeBugReporter
             if (Instance == this) Instance = null;
             logs?.Dispose();
             videoRecorder?.Dispose();
+            if (inputBlocker != null)
+                Destroy(inputBlocker);
             if (screenshotPreview != null) Destroy(screenshotPreview);
             ReleaseStyleTextures();
         }
@@ -149,6 +154,33 @@ namespace MacacaGames.RuntimeBugReporter
                 RequestOpen();
             }
 #endif
+        }
+
+        private void SetInputBlocker(bool blocked)
+        {
+            if (inputBlocker == null && blocked)
+            {
+                inputBlocker = new GameObject("Macaca Beacon Input Blocker");
+                inputBlocker.transform.SetParent(transform, false);
+
+                var canvas = inputBlocker.AddComponent<Canvas>();
+                canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+                canvas.sortingOrder = short.MaxValue;
+                inputBlocker.AddComponent<GraphicRaycaster>();
+
+                var image = inputBlocker.AddComponent<Image>();
+                image.color = Color.clear;
+                image.raycastTarget = true;
+
+                var rect = inputBlocker.GetComponent<RectTransform>();
+                rect.anchorMin = Vector2.zero;
+                rect.anchorMax = Vector2.one;
+                rect.offsetMin = Vector2.zero;
+                rect.offsetMax = Vector2.zero;
+            }
+
+            if (inputBlocker != null)
+                inputBlocker.SetActive(blocked);
         }
 
         private IEnumerator OpenAfterCapture()
@@ -193,6 +225,7 @@ namespace MacacaGames.RuntimeBugReporter
             Cursor.visible = true;
             isOpening = false;
             IsOpen = true;
+            SetInputBlocker(true);
             pendingFocusControl = "BugReportTitle";
             status = settings.enableRollingVideo && settings.secondsAfter > 0
                 ? "Recording the seconds after the incident…"
@@ -646,6 +679,7 @@ namespace MacacaGames.RuntimeBugReporter
             status = "Recapturing screenshot…";
             screenshotAnnotator = null;
             IsOpen = false;
+            SetInputBlocker(false);
             yield return CaptureUtility.CapturePng((bytes, texture) =>
             {
                 screenshotBytes = bytes;
@@ -654,6 +688,7 @@ namespace MacacaGames.RuntimeBugReporter
                 screenshotAnnotator = texture == null ? null : new ScreenshotAnnotator(texture);
             });
             IsOpen = true;
+            SetInputBlocker(true);
             isOpening = false;
             status = screenshotBytes != null ? "Screenshot updated." : "Could not capture screenshot.";
             statusIsError = screenshotBytes == null;

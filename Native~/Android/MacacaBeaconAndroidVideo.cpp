@@ -75,6 +75,7 @@ namespace
         EGLSurface previousDraw = EGL_NO_SURFACE;
         EGLSurface previousRead = EGL_NO_SURFACE;
         EGLContext previousContext = EGL_NO_CONTEXT;
+        bool ownsContext = false;
         GLuint program = 0;
         GLint textureUniform = -1;
         int width = 0;
@@ -198,31 +199,50 @@ namespace
         if (session->display == EGL_NO_DISPLAY || session->previousContext == EGL_NO_CONTEXT)
             return false;
 
+        const EGLint windowFormat = ANativeWindow_getFormat(session->window);
+        EGLConfig config = nullptr;
+        EGLint configCount = 0;
         const EGLint configAttributes[] = {
             EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
             EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR,
+            EGL_RECORDABLE_ANDROID, EGL_TRUE,
+            EGL_NATIVE_VISUAL_ID, windowFormat,
             EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
             EGL_NONE
         };
-        EGLConfig config = nullptr;
-        EGLint configCount = 0;
-        if (eglChooseConfig(session->display, configAttributes, &config, 1, &configCount) != EGL_TRUE || configCount == 0)
+        eglChooseConfig(session->display, configAttributes, &config, 1, &configCount);
+        if (configCount == 0)
             return false;
 
+        // The MediaCodec window surface uses a recordable EGLConfig. Create a
+        // context with that config and share Unity's texture objects; Unity's
+        // own context/config cannot reliably present to this surface.
         const EGLint contextAttributes[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
         session->context = eglCreateContext(session->display, config, session->previousContext, contextAttributes);
+        session->ownsContext = true;
+        if (session->context == EGL_NO_CONTEXT)
+        {
+            LOGE("Android GPU video eglCreateContext failed: 0x%x", eglGetError());
+            return false;
+        }
         session->surface = eglCreateWindowSurface(session->display, config, session->window, nullptr);
-        if (session->context == EGL_NO_CONTEXT || session->surface == EGL_NO_SURFACE)
+        if (session->surface == EGL_NO_SURFACE)
+        {
+            LOGE("Android GPU video eglCreateWindowSurface failed: 0x%x", eglGetError());
             return false;
+        }
         if (eglMakeCurrent(session->display, session->surface, session->surface, session->context) != EGL_TRUE)
+        {
+            LOGE("Android GPU video initial eglMakeCurrent failed: 0x%x", eglGetError());
             return false;
+        }
 
         const char* vertexSource =
             "#version 300 es\n"
             "out vec2 uv;\n"
             "void main() {\n"
             "  const vec2 p[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));\n"
-            "  const vec2 t[3] = vec2[3](vec2(0.0, 1.0), vec2(2.0, 1.0), vec2(0.0, -1.0));\n"
+            "  const vec2 t[3] = vec2[3](vec2(0.0, 0.0), vec2(2.0, 0.0), vec2(0.0, 2.0));\n"
             "  gl_Position = vec4(p[gl_VertexID], 0.0, 1.0); uv = t[gl_VertexID];\n"
             "}\n";
         const char* fragmentSource =
@@ -248,6 +268,7 @@ namespace
         eglQuerySurface(session->display, session->surface, EGL_WIDTH, &session->width);
         eglQuerySurface(session->display, session->surface, EGL_HEIGHT, &session->height);
         session->initialized = session->width > 0 && session->height > 0;
+        eglMakeCurrent(session->display, session->previousDraw, session->previousRead, session->previousContext);
         return session->initialized;
     }
 
@@ -262,7 +283,8 @@ namespace
             if (session->program != 0) glDeleteProgram(session->program);
             eglMakeCurrent(session->display, session->previousDraw, session->previousRead, session->previousContext);
             if (session->surface != EGL_NO_SURFACE) eglDestroySurface(session->display, session->surface);
-            eglDestroyContext(session->display, session->context);
+            if (session->ownsContext)
+                eglDestroyContext(session->display, session->context);
         }
         if (session->window != nullptr)
             ANativeWindow_release(session->window);
@@ -484,6 +506,15 @@ namespace
             return;
         }
 
+        session->previousContext = eglGetCurrentContext();
+        session->previousDraw = eglGetCurrentSurface(EGL_DRAW);
+        session->previousRead = eglGetCurrentSurface(EGL_READ);
+        if (eglMakeCurrent(session->display, session->surface, session->surface, session->context) != EGL_TRUE)
+        {
+            LOGE("Android GPU video frame eglMakeCurrent failed: 0x%x", eglGetError());
+            return;
+        }
+
         GLuint sourceTexture = static_cast<GLuint>(reinterpret_cast<uintptr_t>(submit->nativeTexture));
         glViewport(0, 0, session->width, session->height);
         glUseProgram(session->program);
@@ -497,7 +528,8 @@ namespace
         auto presentation = reinterpret_cast<PFNEGLPRESENTATIONTIMEANDROIDPROC>(eglGetProcAddress("eglPresentationTimeANDROID"));
         if (presentation != nullptr)
             presentation(session->display, session->surface, submit->presentationNanoseconds);
-        eglSwapBuffers(session->display, session->surface);
+        if (eglSwapBuffers(session->display, session->surface) != EGL_TRUE)
+            LOGE("Android GPU video eglSwapBuffers failed: 0x%x", eglGetError());
         eglMakeCurrent(session->display, session->previousDraw, session->previousRead, session->previousContext);
     }
 }

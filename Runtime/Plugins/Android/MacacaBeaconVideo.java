@@ -294,8 +294,10 @@ public final class MacacaBeaconVideo {
         private final int fps;
         private int track = -1;
         private boolean muxerStarted;
-        private boolean finished;
+        private volatile boolean finished;
         private volatile String error;
+        private int encodedSampleCount;
+        private long lastPresentationTimeUs = -1L;
         private Thread drainThread;
 
         SurfaceSession(String path, int requestedWidth, int requestedHeight, int requestedFps, int bitrate) throws Exception {
@@ -342,6 +344,8 @@ public final class MacacaBeaconVideo {
                     muxer.stop();
                     muxerStarted = false;
                 }
+                if (error == null && encodedSampleCount == 0)
+                    error = "Android Surface encoder produced no video samples.";
                 return error == null ? 1 : 0;
             } catch (Exception exception) {
                 error = exception.getMessage() == null ? "Android Surface finalization failed." : exception.getMessage();
@@ -363,9 +367,14 @@ public final class MacacaBeaconVideo {
                 } else if (result >= 0) {
                     ByteBuffer output = codec.getOutputBuffer(result);
                     if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 && bufferInfo.size > 0 && muxerStarted && output != null) {
+                        long minimumStepUs = Math.max(1L, 1000000L / Math.max(1, fps));
+                        if (bufferInfo.presentationTimeUs <= lastPresentationTimeUs)
+                            bufferInfo.presentationTimeUs = lastPresentationTimeUs + minimumStepUs;
+                        lastPresentationTimeUs = bufferInfo.presentationTimeUs;
                         output.position(bufferInfo.offset);
                         output.limit(bufferInfo.offset + bufferInfo.size);
                         muxer.writeSampleData(track, output, bufferInfo);
+                        encodedSampleCount++;
                     }
                     boolean eos = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
                     codec.releaseOutputBuffer(result, false);
