@@ -6,6 +6,8 @@
 #include <mfreadwrite.h>
 #include <shlwapi.h>
 #include <wincodec.h>
+#include <d3d11.h>
+#include <dxgi.h>
 
 #include <algorithm>
 #include <cmath>
@@ -23,6 +25,7 @@
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "d3d11.lib")
 #endif
 
 namespace
@@ -101,8 +104,9 @@ namespace
         bool mediaFoundationStarted = false;
         bool uninitializeCom = false;
         bool ready = false;
-        bool finalized = false;
-        std::string lastError;
+    bool finalized = false;
+    volatile LONG pendingGpuEvents = 0;
+    std::string lastError;
 
         ~EncoderSession()
         {
@@ -119,6 +123,13 @@ namespace
             lastError = HResultMessage(operation, result);
             return false;
         }
+    };
+
+    struct GpuSubmit
+    {
+        EncoderSession* session = nullptr;
+        void* nativeTexture = nullptr;
+        double presentationSeconds = 0.0;
     };
 
     bool ConfigureOutput(EncoderSession* session, int bitrate)
@@ -254,6 +265,42 @@ namespace
         SafeRelease(mediaBuffer);
         return SUCCEEDED(result) || session->Fail("Media Foundation rejected a captured frame", result);
     }
+
+    bool WriteGpuFrame(EncoderSession* session, void* nativeTexture, double presentationSeconds)
+    {
+        if (session == nullptr || nativeTexture == nullptr || !session->ready || session->finalized)
+            return false;
+
+        ID3D11Texture2D* texture = static_cast<ID3D11Texture2D*>(nativeTexture);
+        D3D11_TEXTURE2D_DESC description = {};
+        texture->GetDesc(&description);
+        if (description.Width != static_cast<UINT>(session->width) ||
+            description.Height != static_cast<UINT>(session->height) ||
+            description.Format != DXGI_FORMAT_B8G8R8A8_UNORM)
+        {
+            session->lastError = "The D3D11 capture texture must be BGRA8 and match the encoder dimensions.";
+            return false;
+        }
+
+        IMFMediaBuffer* mediaBuffer = nullptr;
+        IMFSample* sample = nullptr;
+        HRESULT result = MFCreateDXGISurfaceBuffer(
+            __uuidof(ID3D11Texture2D), texture, 0, FALSE, &mediaBuffer);
+        if (SUCCEEDED(result)) result = MFCreateSample(&sample);
+        if (SUCCEEDED(result)) result = sample->AddBuffer(mediaBuffer);
+
+        LONGLONG sampleTime = static_cast<LONGLONG>(std::llround(std::max(0.0, presentationSeconds) * 10000000.0));
+        if (sampleTime <= session->lastSampleTime)
+            sampleTime = session->lastSampleTime + 1;
+        if (SUCCEEDED(result)) result = sample->SetSampleTime(sampleTime);
+        if (SUCCEEDED(result)) result = sample->SetSampleDuration(session->frameDuration);
+        if (SUCCEEDED(result)) result = session->writer->WriteSample(session->streamIndex, sample);
+        if (SUCCEEDED(result)) session->lastSampleTime = sampleTime;
+
+        SafeRelease(sample);
+        SafeRelease(mediaBuffer);
+        return SUCCEEDED(result) || session->Fail("Media Foundation rejected a D3D11 texture frame", result);
+    }
 }
 
 extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_IsAvailable()
@@ -356,6 +403,47 @@ extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_Create(
     return session;
 }
 
+static void MacacaBeaconWindowsVideo_RenderEvent(int eventId, void* data)
+{
+    if (eventId != 1)
+        return;
+    GpuSubmit* submit = static_cast<GpuSubmit*>(data);
+    EncoderSession* session = submit == nullptr ? nullptr : submit->session;
+    if (session != nullptr)
+        WriteGpuFrame(session, submit->nativeTexture, submit->presentationSeconds);
+    if (session != nullptr)
+        InterlockedDecrement(&session->pendingGpuEvents);
+    delete submit;
+}
+
+extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_GpuIsAvailable()
+{
+    return 1;
+}
+
+extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_GpuGetRenderEventFunc()
+{
+    return reinterpret_cast<void*>(&MacacaBeaconWindowsVideo_RenderEvent);
+}
+
+extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_GpuAllocateSubmitData(
+    void* pointer,
+    void* nativeTexture,
+    double presentationSeconds)
+{
+    EncoderSession* session = static_cast<EncoderSession*>(pointer);
+    if (session == nullptr || nativeTexture == nullptr || !session->ready || session->finalized)
+        return nullptr;
+    GpuSubmit* submit = new (std::nothrow) GpuSubmit();
+    if (submit == nullptr)
+        return nullptr;
+    submit->session = session;
+    submit->nativeTexture = nativeTexture;
+    submit->presentationSeconds = presentationSeconds;
+    InterlockedIncrement(&session->pendingGpuEvents);
+    return submit;
+}
+
 extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_AddJpeg(
     void* pointer,
     const uint8_t* jpegBytes,
@@ -409,6 +497,8 @@ extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_Finish(voi
     EncoderSession* session = static_cast<EncoderSession*>(pointer);
     if (session == nullptr || !session->ready || session->finalized)
         return 0;
+    while (InterlockedCompareExchange(&session->pendingGpuEvents, 0, 0) != 0)
+        Sleep(0);
     if (session->lastSampleTime < 0)
     {
         session->lastError = "No captured video frame was written.";

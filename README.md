@@ -2,6 +2,8 @@
 
 > Capture the moment. Signal the issue.
 
+![Macaca Beacon](Documentation~/Images/macaca-beacon-banner.png)
+
 遊戲內、可抽離為 UPM 的 Bug Report 工具。它使用 **IMGUI**（不依賴 UGUI），桌面可用 F6 開啟，iOS／Android 則提供安全區角落的低干擾入口與三指長按手勢；工具會收集截圖、最近 log、裝置／build／場景資訊，並送到 Slack。
 
 截圖預覽提供單層內建標注畫筆，圖片顯示後即可直接繪製，不需要進入另一個模式。工具列固定提供紅／黃／青三色、三種筆刷粗細、Undo、可復原的 Clear，以及重新截圖。完成的筆跡會合成進 Slack 與本地失敗備援所使用的 PNG。
@@ -111,7 +113,7 @@ BugReporter.SetVideoRecordingEnabled(false);
 bool enabled = BugReporter.IsVideoRecordingEnabled;
 ```
 
-本專案另外以 `SROptions.MacacaBeacon.cs` 的 partial class 將同一個開關放入 `SRDebugger > Options > Macaca Beacon`，Beacon package 本身不引用 SRDebugger。
+若專案使用 SRDebugger，可從 Unity Package Manager 匯入 `SRDebugger Integration` sample。匯入後，`SROptions.MacacaBeacon.cs` 會被複製到 `Assets`，將同一個開關放入 `SRDebugger > Options > Macaca Beacon`。這個整合檔不會由 Beacon runtime 自動編譯，因此 Beacon package 本身不引用 SRDebugger，也不會產生 assembly dependency。
 
 ## 分享至其他專案
 

@@ -1,0 +1,254 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.IO;
+using System.Threading.Tasks;
+using UnityEngine;
+
+namespace MacacaGames.RuntimeBugReporter
+{
+    internal sealed class MacOsGpuRollingVideoRecorder : IDisposable
+    {
+        private sealed class Segment
+        {
+            public string Path;
+            public double Start;
+            public double End;
+        }
+
+        private readonly MonoBehaviour host;
+        private readonly BugReporterSettings settings;
+        private readonly List<Segment> segments = new List<Segment>();
+        private GpuFrameCapture capture;
+        private MacOsGpuVideoSession session;
+        private Coroutine coroutine;
+        private bool requestedEnabled;
+        private bool incidentPending;
+        private double incidentTime;
+        private double incidentEndTime;
+        private Action<VideoCaptureResult> incidentCompleted;
+        private int width;
+        private int height;
+        private double segmentStart;
+        private string directory;
+
+        public bool IsFinalizing { get; private set; }
+        public bool IsEncoding { get; private set; }
+        public bool IsEnabled => requestedEnabled;
+
+        public MacOsGpuRollingVideoRecorder(MonoBehaviour host, BugReporterSettings settings)
+        {
+            this.host = host;
+            this.settings = settings;
+        }
+
+        public void Start()
+        {
+            SetEnabled(settings.enableRollingVideo);
+        }
+
+        public void SetEnabled(bool enabled)
+        {
+            requestedEnabled = enabled;
+            if (enabled && coroutine == null)
+            {
+                capture = new GpuFrameCapture();
+                coroutine = host.StartCoroutine(CaptureLoop());
+            }
+            else if (!enabled && !IsFinalizing)
+            {
+                Stop();
+            }
+        }
+
+        public void MarkIncident(Action<VideoCaptureResult> completed)
+        {
+            if (!requestedEnabled)
+            {
+                completed?.Invoke(null);
+                return;
+            }
+
+            incidentPending = true;
+            incidentTime = Time.realtimeSinceStartupAsDouble;
+            incidentEndTime = incidentTime + settings.secondsAfter;
+            incidentCompleted = completed;
+            IsFinalizing = true;
+            if (settings.secondsAfter <= 0)
+                host.StartCoroutine(FinalizeIncident());
+        }
+
+        private IEnumerator CaptureLoop()
+        {
+            var waitForFrame = new WaitForEndOfFrame();
+            var interval = 1d / Math.Max(1, settings.videoFramesPerSecond);
+            var nextCapture = 0d;
+            while (requestedEnabled)
+            {
+                yield return waitForFrame;
+                var now = Time.realtimeSinceStartupAsDouble;
+                if (now < nextCapture)
+                    continue;
+                nextCapture = now + interval;
+
+                GpuFrameCapture.GpuFrame frame = default(GpuFrameCapture.GpuFrame);
+                yield return capture.Capture(settings.videoWidth, value => frame = value);
+                if (!frame.IsValid)
+                {
+                    Debug.LogWarning("[Macaca Beacon] GPU capture returned an invalid RenderTexture.");
+                    continue;
+                }
+
+                if (session == null)
+                {
+                    width = frame.Width;
+                    height = frame.Height;
+                    BeginSegment(now);
+                }
+
+                if (!session.Submit(frame, now - segmentStart))
+                {
+                    Debug.LogWarning("[Macaca Beacon] GPU video frame submission failed.");
+                    yield return FinalizeIncident();
+                    yield break;
+                }
+
+                if (now - segmentStart >= 2.0)
+                {
+                    FinishSegment(now);
+                    PruneSegments(now - Math.Max(1, settings.secondsBefore) - 2.0);
+                }
+
+                if (incidentPending && now >= incidentEndTime)
+                    yield return FinalizeIncident();
+            }
+        }
+
+        private void BeginSegment(double start)
+        {
+            if (string.IsNullOrEmpty(directory))
+            {
+                directory = Path.Combine(Application.temporaryCachePath, "MacacaBeacon", "GpuSegments-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(directory);
+            }
+
+            segmentStart = start;
+            var path = Path.Combine(directory, "segment-" + Guid.NewGuid().ToString("N") + ".mp4");
+            session = MacOsGpuVideoSession.TryCreate(path, width, height, settings.videoFramesPerSecond, settings.videoBitrateKbps);
+            if (session == null)
+                throw new InvalidOperationException("Could not create the macOS GPU video session.");
+        }
+
+        private void FinishSegment(double end)
+        {
+            if (session == null)
+                return;
+            var path = session.OutputPath;
+            var finished = session.Finish();
+            session.Dispose();
+            session = null;
+            if (finished && File.Exists(path))
+                segments.Add(new Segment { Path = path, Start = segmentStart, End = end });
+            else
+                TryDelete(path);
+        }
+
+        private IEnumerator FinalizeIncident()
+        {
+            if (!incidentPending)
+                yield break;
+            incidentPending = false;
+            FinishSegment(Time.realtimeSinceStartupAsDouble);
+            IsEncoding = true;
+
+            var selected = new List<string>();
+            var startTime = incidentTime - Math.Max(0, settings.secondsBefore);
+            var endTime = incidentEndTime;
+            for (var index = 0; index < segments.Count; index++)
+            {
+                var segment = segments[index];
+                if (segment.End > startTime && segment.Start < endTime)
+                    selected.Add(segment.Path);
+            }
+
+            VideoCaptureResult result = null;
+            if (selected.Count > 0)
+            {
+                var outputDirectory = Path.Combine(Application.temporaryCachePath, "MacacaBeacon", "Captures");
+                Directory.CreateDirectory(outputDirectory);
+                var outputPath = Path.Combine(outputDirectory, "incident-" + Guid.NewGuid().ToString("N") + ".mp4");
+                var mergeTask = Task.Run(() => MacOsGpuVideoBridge.ConcatSegments(outputPath, selected));
+                while (!mergeTask.IsCompleted)
+                    yield return null;
+                if (mergeTask.IsCompletedSuccessfully && mergeTask.Result && File.Exists(outputPath))
+                {
+                    var duration = Math.Max(1d / Math.Max(1, settings.videoFramesPerSecond), endTime - startTime);
+                    result = new VideoCaptureResult(outputPath, ".mp4", "video/mp4", duration,
+                        Math.Max(1, Mathf.RoundToInt((float)(duration * settings.videoFramesPerSecond))),
+                        "Apple Metal H.264");
+                }
+                else
+                {
+                    TryDelete(outputPath);
+                }
+            }
+
+            IsFinalizing = false;
+            IsEncoding = false;
+            incidentCompleted?.Invoke(result);
+            incidentCompleted = null;
+            CleanupSegments();
+            if (!requestedEnabled)
+                Stop();
+        }
+
+        private void PruneSegments(double cutoff)
+        {
+            for (var index = segments.Count - 1; index >= 0; index--)
+            {
+                if (segments[index].End >= cutoff)
+                    continue;
+                TryDelete(segments[index].Path);
+                segments.RemoveAt(index);
+            }
+        }
+
+        private void CleanupSegments()
+        {
+            for (var index = 0; index < segments.Count; index++)
+                TryDelete(segments[index].Path);
+            segments.Clear();
+            if (!string.IsNullOrEmpty(directory))
+            {
+                try { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+                catch { }
+            }
+            directory = null;
+        }
+
+        private void Stop()
+        {
+            requestedEnabled = false;
+            if (coroutine != null)
+            {
+                host.StopCoroutine(coroutine);
+                coroutine = null;
+            }
+            FinishSegment(Time.realtimeSinceStartupAsDouble);
+            CleanupSegments();
+            capture?.Dispose();
+            capture = null;
+        }
+
+        private static void TryDelete(string path)
+        {
+            try { if (!string.IsNullOrEmpty(path) && File.Exists(path)) File.Delete(path); }
+            catch { }
+        }
+
+        public void Dispose()
+        {
+            Stop();
+        }
+    }
+}

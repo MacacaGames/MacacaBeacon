@@ -9,6 +9,11 @@ namespace MacacaGames.RuntimeBugReporter
 {
     internal sealed class RollingVideoRecorder
     {
+        // The Metal texture-submit path is still experimental. Keep it opt-in
+        // until it has been validated against the Editor's native plugin
+        // lifetime and graphics-device reset paths; the existing CPU/native
+        // MP4 path is the crash-safe default.
+        private const bool EnableExperimentalMacOsGpuPath = true;
         private readonly MonoBehaviour host;
         private readonly BugReporterSettings settings;
         private readonly Queue<VideoCaptureFrame> history = new Queue<VideoCaptureFrame>();
@@ -21,26 +26,43 @@ namespace MacacaGames.RuntimeBugReporter
         private int capturedHeight;
         private Coroutine captureCoroutine;
         private bool requestedEnabled;
+        private bool isFinalizing;
+        private bool isEncoding;
         private string frameCacheDirectory;
         private long historyBytes;
+        private readonly MacOsGpuRollingVideoRecorder gpuRecorder;
 
-        public bool IsFinalizing { get; private set; }
-        public bool IsEncoding { get; private set; }
-        public bool IsEnabled => requestedEnabled;
+        public bool IsFinalizing => gpuRecorder != null ? gpuRecorder.IsFinalizing : isFinalizing;
+        public bool IsEncoding => gpuRecorder != null ? gpuRecorder.IsEncoding : isEncoding;
+        public bool IsEnabled => gpuRecorder != null ? gpuRecorder.IsEnabled : requestedEnabled;
 
         public RollingVideoRecorder(MonoBehaviour host, BugReporterSettings settings)
         {
             this.host = host;
             this.settings = settings;
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+            if (EnableExperimentalMacOsGpuPath && MacOsGpuVideoBridge.IsAvailable)
+                gpuRecorder = new MacOsGpuRollingVideoRecorder(host, settings);
+#endif
         }
 
         public void Start()
         {
+            if (gpuRecorder != null)
+            {
+                gpuRecorder.Start();
+                return;
+            }
             SetEnabled(settings.enableRollingVideo);
         }
 
         public void SetEnabled(bool enabled)
         {
+            if (gpuRecorder != null)
+            {
+                gpuRecorder.SetEnabled(enabled);
+                return;
+            }
             requestedEnabled = enabled;
             if (enabled)
             {
@@ -58,6 +80,11 @@ namespace MacacaGames.RuntimeBugReporter
 
         public void MarkIncident(Action<VideoCaptureResult> completed)
         {
+            if (gpuRecorder != null)
+            {
+                gpuRecorder.MarkIncident(completed);
+                return;
+            }
             if (!requestedEnabled)
             {
                 completed?.Invoke(null);
@@ -75,7 +102,7 @@ namespace MacacaGames.RuntimeBugReporter
             Debug.Log("[Macaca Beacon] Incident video window: requested before " + settings.secondsBefore.ToString("0.0") +
                       "s, available before " + availableSeconds.ToString("0.0") + "s, frames " + history.Count +
                       ", cache " + settings.maximumVideoCacheMegabytes + " MB.");
-            IsFinalizing = true;
+            isFinalizing = true;
             if (settings.secondsAfter <= 0)
                 BeginFinishIncident();
         }
@@ -92,7 +119,7 @@ namespace MacacaGames.RuntimeBugReporter
                 // taking new screenshots while the encoder finalizes. This
                 // avoids competing with gameplay for GPU readback and JPEG
                 // compression time.
-                if (IsFinalizing && incidentFrames == null)
+                if (isFinalizing && incidentFrames == null)
                     continue;
                 if (Time.realtimeSinceStartup < nextCapture)
                     continue;
@@ -167,7 +194,7 @@ namespace MacacaGames.RuntimeBugReporter
                 {
                     var expired = history.Dequeue();
                     historyBytes -= expired.ByteCount;
-                    if (!IsFinalizing)
+                    if (!isFinalizing)
                         expired.DeleteDataFile();
                 }
 
@@ -200,7 +227,7 @@ namespace MacacaGames.RuntimeBugReporter
             var completed = incidentCompleted;
             incidentFrames = null;
             incidentCompleted = null;
-            IsEncoding = true;
+            isEncoding = true;
             host.StartCoroutine(FinishIncident(frames, completed));
         }
 
@@ -277,8 +304,8 @@ namespace MacacaGames.RuntimeBugReporter
             // to keep Android JNI calls safe.
             yield return null;
 
-            IsFinalizing = false;
-            IsEncoding = false;
+            isFinalizing = false;
+            isEncoding = false;
             if (result == null)
             {
                 Debug.LogWarning("[Macaca Beacon] Video finalization failed: " + (encoderError ?? "unknown encoder error"));
@@ -323,6 +350,13 @@ namespace MacacaGames.RuntimeBugReporter
                     return false;
             }
             return true;
+        }
+
+        public void Dispose()
+        {
+            gpuRecorder?.Dispose();
+            if (gpuRecorder == null)
+                StopCapture();
         }
 
     }

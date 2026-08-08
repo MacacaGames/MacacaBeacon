@@ -20,6 +20,7 @@ xcrun clang++ \
   -framework CoreGraphics \
   -framework ImageIO \
   -framework VideoToolbox \
+  -framework Metal \
   "$script_dir/MacacaBeaconVideo.mm" \
   -o "$output_path"
 

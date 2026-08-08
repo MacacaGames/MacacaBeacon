@@ -25,6 +25,11 @@
       "displayName": "Runtime Setup",
       "description": "Example bootstrap component for projects that prefer scene-based setup.",
       "path": "Samples~/RuntimeSetup"
+    },
+    {
+      "displayName": "SRDebugger Integration",
+      "description": "Optional SROptions entry for controlling Macaca Beacon rolling video.",
+      "path": "Samples~/SRDebuggerIntegration"
     }
   ]
 }
