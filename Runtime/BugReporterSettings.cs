@@ -52,13 +52,13 @@ namespace MacacaGames.RuntimeBugReporter
 
         [Header("Rolling video (optional)")]
         [Tooltip("Continuously keeps low-rate frames in memory. On macOS and iOS they are finalized as H.264 MP4; unsupported platforms can use the legacy AVI fallback.")]
-        public bool enableRollingVideo = false;
+        public bool enableRollingVideo = true;
         [Tooltip("Prefer a Slack-friendly H.264 MP4 when a runtime encoder backend is available.")]
         public bool preferMp4 = true;
         [Tooltip("Use managed MJPEG AVI when this platform has no MP4 backend or MP4 encoding fails.")]
         public bool allowLegacyAviFallback = true;
-        [Range(1, 15)] public int videoFramesPerSecond = 6;
-        [Range(1, 10)] public int secondsBefore = 8;
+        [Range(1, 15)] public int videoFramesPerSecond = 12;
+        [Range(1, 10)] public int secondsBefore = 10;
         [Range(0, 10)] public int secondsAfter = 1;
         [Range(320, 1920)] public int videoWidth = 960;
         [Range(20, 90)] public int videoJpegQuality = 65;

@@ -59,6 +59,12 @@ namespace MacacaGames.RuntimeBugReporter
         private float mobileGestureStartedAt = -1f;
         private bool mobileGestureTriggered;
 
+        // The two-column layout needs more room than its old 900 px cutoff
+        // suggests: the screenshot card, form card, gutters, and card padding
+        // all have useful minimum widths. Keep portrait and split-screen views
+        // stacked so the form never collapses into a clipped sliver.
+        private const float DesktopLayoutMinimumWidth = 1120f;
+
         internal void Initialize(BugReporterSettings value)
         {
             settings = value;
@@ -209,7 +215,7 @@ namespace MacacaGames.RuntimeBugReporter
                 current.Use();
             }
 
-            var uiScale = Mathf.Clamp(Screen.height / 900f, 0.9f, 1.25f) * settings.interfaceScale;
+            var uiScale = Mathf.Clamp(Mathf.Min(Screen.width / 1280f, Screen.height / 900f), 0.9f, 1.25f) * settings.interfaceScale;
             EnsureStyles(uiScale);
             GUI.depth = -10000;
             var overlay = new Rect(0, 0, Screen.width, Screen.height);
@@ -264,7 +270,7 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.EndHorizontal();
             GUILayout.Space(18 * styleScale);
 
-            if (windowRect.width >= 900f)
+            if (CanUseDesktopLayout())
                 DrawDesktopContent();
             else
                 DrawCompactContent();
@@ -297,7 +303,7 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.BeginHorizontal(GUILayout.ExpandHeight(true));
             GUILayout.Space(28 * styleScale);
             GUILayout.BeginVertical(cardStyle, GUILayout.Width(leftWidth), GUILayout.ExpandHeight(true));
-            DrawScreenshotPanel(Mathf.Clamp(windowRect.height * 0.43f, 320f, 460f));
+            DrawScreenshotPanel(Mathf.Clamp(windowRect.height * 0.50f, 360f, 560f));
             GUILayout.Space(16 * styleScale);
             DrawCaptureSummary();
             GUILayout.FlexibleSpace();
@@ -313,13 +319,18 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.EndHorizontal();
         }
 
+        private bool CanUseDesktopLayout()
+        {
+            return windowRect.width >= DesktopLayoutMinimumWidth && windowRect.height >= 720f;
+        }
+
         private void DrawCompactContent()
         {
             GUILayout.BeginHorizontal();
             GUILayout.Space(28 * styleScale);
             GUILayout.BeginVertical(cardStyle, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
             formScroll = GUILayout.BeginScrollView(formScroll, false, true, GUILayout.ExpandHeight(true));
-            DrawScreenshotPanel(300f * styleScale);
+            DrawScreenshotPanel(Mathf.Clamp(windowRect.width * 0.42f, 360f, 520f));
             GUILayout.Space(14 * styleScale);
             DrawCaptureSummary();
             GUILayout.Space(18 * styleScale);
@@ -364,7 +375,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         private void DrawAnnotationToolbar(bool canInteract)
         {
-            var compact = windowRect.width < 900f;
+            var compact = !CanUseDesktopLayout();
             if (compact)
             {
                 GUILayout.Label("DRAW ON THE SCREENSHOT", labelStyle);
@@ -786,7 +797,7 @@ namespace MacacaGames.RuntimeBugReporter
 #if UNITY_IOS || UNITY_ANDROID
         private void DrawMobileEntry()
         {
-            EnsureStyles(Mathf.Clamp(Screen.height / 900f, 0.9f, 1.25f) * settings.interfaceScale);
+            EnsureStyles(Mathf.Clamp(Mathf.Min(Screen.width / 1280f, Screen.height / 900f), 0.9f, 1.25f) * settings.interfaceScale);
             var safeArea = Screen.safeArea;
             var size = Mathf.Clamp(settings.mobileEntrySize * styleScale, 48f, 112f);
             var margin = Mathf.Max(10f, 14f * styleScale);
