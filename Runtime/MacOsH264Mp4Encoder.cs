@@ -46,10 +46,14 @@ namespace MacacaGames.RuntimeBugReporter
                 for (var index = 0; index < frames.Count; index++)
                 {
                     var frame = frames[index];
-                    if (frame.JpegData == null || frame.JpegData.Length == 0)
+                    var frameData = frame.ReadData();
+                    if (frameData == null || frameData.Length == 0)
                         continue;
                     var presentationTime = Math.Max(0d, frame.CapturedAt - sourceStart);
-                    if (NativeAddJpeg(session, frame.JpegData, frame.JpegData.Length, presentationTime) == 0)
+                    var added = frame.Format == VideoCaptureFrameFormat.Rgba32
+                        ? NativeAddRgba(session, frameData, frameData.Length, frame.Width, frame.Height, presentationTime)
+                        : NativeAddJpeg(session, frameData, frameData.Length, presentationTime);
+                    if (added == 0)
                     {
                         error = LastError(session, "AVAssetWriter rejected a captured frame.");
                         return false;
@@ -61,8 +65,12 @@ namespace MacacaGames.RuntimeBugReporter
                 // last frame to the requested incident end keeps sparse capture from shortening time.
                 if (durationSeconds > lastPresentationTime + (0.5d / Math.Max(1, framesPerSecond)))
                 {
-                    var lastFrame = frames[frames.Count - 1].JpegData;
-                    if (lastFrame != null && lastFrame.Length > 0 && NativeAddJpeg(session, lastFrame, lastFrame.Length, durationSeconds) == 0)
+                    var finalFrame = frames[frames.Count - 1];
+                    var lastFrame = finalFrame.ReadData();
+                    var added = finalFrame.Format == VideoCaptureFrameFormat.Rgba32
+                        ? NativeAddRgba(session, lastFrame, lastFrame == null ? 0 : lastFrame.Length, finalFrame.Width, finalFrame.Height, durationSeconds)
+                        : NativeAddJpeg(session, lastFrame, lastFrame == null ? 0 : lastFrame.Length, durationSeconds);
+                    if (lastFrame != null && lastFrame.Length > 0 && added == 0)
                     {
                         error = LastError(session, "AVAssetWriter could not extend the final frame duration.");
                         return false;
@@ -119,6 +127,13 @@ namespace MacacaGames.RuntimeBugReporter
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_AddJpeg")]
 #endif
         private static extern int NativeAddJpeg(IntPtr session, byte[] jpegBytes, int byteCount, double presentationSeconds);
+
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_AddRgba")]
+#else
+        [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_AddRgba")]
+#endif
+        private static extern int NativeAddRgba(IntPtr session, byte[] rgbaBytes, int byteCount, int width, int height, double presentationSeconds);
 
 #if UNITY_IOS
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_Finish")]

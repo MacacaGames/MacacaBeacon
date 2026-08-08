@@ -37,19 +37,21 @@
 - 截圖上的選填畫筆標注
 - Product、version、build GUID、Unity、platform、OS、CPU、RAM、GPU、VRAM、resolution、scene
 - 有固定容量上限的 recent log ring buffer；Error／Exception 包含 stack trace
-- 選填影片：macOS／Windows／iOS 優先 H.264 MP4，預設 6 FPS、前 8 秒＋後 1 秒、無音訊
+- 選填影片：macOS／Windows／Android／iOS 優先 H.264 MP4，預設 6 FPS、前 8 秒＋後 1 秒、無音訊
 
 表單內會顯示資料用途聲明；內容可由 Settings 自訂。請依發行地區及資料內容完成實際隱私／同意流程。
 
 ## 錄影限制
 
-`Enable Rolling Video` 預設關閉。啟用後會持續低頻擷取並保留帶有 realtime timestamp 的 JPEG frame ring buffer，換取 Player build 也能保留事件發生前畫面。Unity Recorder 是 Editor-only，不能解決正式 Player 的回溯錄影。
+`Enable Rolling Video` 預設關閉。啟用後會使用 `AsyncGPUReadback` 擷取縮放後的 RGBA frame，非同步寫入 `Application.temporaryCachePath` 的有時限 ring buffer。正常路徑不再建立 `Texture2D`、不執行 `EncodeToJPG`，也不把完整 rolling frame 集合常駐 managed heap。事件完成編碼或 runtime 關閉錄影後，raw cache 會自動清除。只有不支援 async GPU readback 的裝置才使用低頻 JPEG compatibility fallback。
 
-macOS Editor／Standalone Player 使用套件內的 Universal Binary（Apple Silicon + Intel）和 AVAssetWriter 產生 H.264 MP4。Windows Editor／64-bit Standalone Player 使用 Windows 內建 Media Foundation H.264 encoder，並以 WIC 解碼 rolling JPEG frame；不需要 ffmpeg 或隨 Player 安裝額外 codec。兩者的 MIME type 都是 `video/mp4`，且會把 MP4 metadata 寫在 media data 前面，方便 Slack／瀏覽器提早建立預覽。
+`Maximum Video Cache Megabytes` 預設為 512 MB。直式 960 px、6 FPS、8 秒歷史通常需要比橫式畫面更多 temporary space；raw cache 超過上限時會先丟棄最舊 frame，因此低儲存空間裝置的實際保留秒數可能短於 `Seconds Before`。啟動事件時會在 log 顯示 requested 與 available 秒數。這個限制只影響 temporary raw cache，最終 MP4 仍由 bitrate 與附件大小限制控制。
 
-影片在背景 thread 完成，先寫進 `Application.temporaryCachePath`，建立 report 時再交易式複製到 PendingReports，Slack 則使用 `UploadHandlerFile` 直接由檔案上傳，避免另一份完整影片常駐 managed heap。
+macOS Editor／Standalone Player 使用套件內的 Universal Binary（Apple Silicon + Intel）和 AVAssetWriter 產生 H.264 MP4，由系統自動選擇硬體 encoder，硬體 session 暫時不可用時仍可回退軟體。Windows Editor／64-bit Standalone Player 使用 Windows 內建 Media Foundation H.264 encoder。兩者直接接受 RGBA frame，不再經過 JPG encode/decode；不需要 ffmpeg 或隨 Player 安裝額外 codec。MIME type 都是 `video/mp4`，且會把 MP4 metadata 寫在 media data 前面，方便 Slack／瀏覽器提早建立預覽。
 
-`Prefer Mp4` 預設開啟。若目前平台尚無 MP4 backend，或 macOS 的 H.264 encoder 暫時不可用，`Allow Legacy Avi Fallback` 可讓回報退回純 C# MJPEG AVI，而不是整份報告失敗。目前正式 MP4 backend 支援矩陣：
+影片先寫進 `Application.temporaryCachePath`，建立 report 時再交易式複製到 PendingReports，Slack 則使用 `UploadHandlerFile` 直接由檔案上傳，避免另一份完整影片常駐 managed heap。Windows 與 Apple backend 在背景 thread 完成；Android 由 Unity main thread 啟動 Java encode job，實際檔案讀取、RGBA → YUV420 與 MediaCodec finalization 都在低優先序 Java worker 執行。回報表單在背景編碼期間仍可正常輸入，Send 會等影片 ready 後才開放。
+
+`Prefer Mp4` 預設開啟。若目前平台尚無 MP4 backend，或原生 H.264 encoder 暫時不可用，`Allow Legacy Avi Fallback` 可讓回報退回純 C# MJPEG AVI，而不是整份報告失敗。目前正式 MP4 backend 支援矩陣：
 
 | 平台 | Runtime 影片輸出 |
 |---|---|
@@ -58,7 +60,8 @@ macOS Editor／Standalone Player 使用套件內的 Universal Binary（Apple Sil
 | Windows Editor (x64) | H.264 MP4；可選 AVI fallback |
 | Windows Standalone (x64) | H.264 MP4；可選 AVI fallback |
 | iOS device／Simulator | H.264 MP4；可選 AVI fallback |
-| Linux / Android | 目前使用 AVI fallback；介面已保留平台 encoder 擴充點 |
+| Android device | H.264 MP4（MediaCodec／MediaMuxer）；可選 AVI fallback |
+| Linux | 目前使用 AVI fallback；介面已保留平台 encoder 擴充點 |
 | WebGL | 建議停用 rolling video |
 
 macOS native source 位於 `Native~/macOS`，執行 `build.sh` 可重建 `Runtime/Plugins/macOS/MacacaBeaconVideo.bundle`。它只連結 Apple 系統 framework，沒有額外第三方 runtime dependency。
@@ -67,7 +70,9 @@ Windows native source 位於 `Native~/Windows`。在裝有 Visual Studio 2022「
 
 iOS 使用 `Runtime/Plugins/iOS/MacacaBeaconVideo.mm`，由 Unity 產生 Xcode project 時直接編入，透過 `DllImport("__Internal")` 呼叫 AVAssetWriter。它使用 iOS 硬體 H.264 路徑，並由 PluginImporter 自動加入 AVFoundation、CoreGraphics、CoreMedia、CoreVideo、ImageIO 與 VideoToolbox；不需要在 Scene 放置額外元件。
 
-其他平台可以實作 `IVideoEncoderBackend`，並在遊戲初始化時呼叫 `BugReporter.SetVideoEncoder(backend)`。Backend 會收到含 JPEG bytes 與 realtime timestamp 的唯讀 frame list，負責將結果寫到指定路徑；成功後套件會自動接手本地 staging、Slack 上傳與清理。
+Android 使用 `Runtime/Plugins/Android/MacacaBeaconVideo.java`，透過 Android 內建的 `MediaCodec` 與 `MediaMuxer` 將 RGBA frame 轉換為 encoder 支援的 YUV420 並編碼為 H.264 MP4；不需要額外安裝 ffmpeg 或加入錄影權限。
+
+其他平台可以實作 `IVideoEncoderBackend`，並在遊戲初始化時呼叫 `BugReporter.SetVideoEncoder(backend)`。Backend 會收到含 frame format、尺寸、temporary data path 與 realtime timestamp 的唯讀 frame list，並可用 `ReadData()` 逐張載入，避免一次載入整段影片；成功後套件會自動接手本地 staging、Slack 上傳與清理。
 
 每個 frame 會記錄 double precision realtime timestamp，歷史緩衝依秒數而非 frame 數裁切。MP4 使用各 frame 的實際 presentation timestamp，並將最後一幀延伸到設定的 incident end；AVI fallback 也依實際捕捉時長產生時基。裝置無法達到設定 FPS 時只會降低流暢度，不會再把 8 秒內容加速成較短影片。若 Play Mode／Player 啟動尚未滿 `Seconds Before`，則只能保留啟動後實際存在的歷史畫面。
 
@@ -96,6 +101,17 @@ BugReporter.RegisterDataProvider(new GameBugContext());
 ```
 
 也可手動呼叫 `BugReporter.Open()`，或用 `BugReporter.SetTransport(customTransport)` 注入任何 `IBugReportTransport`。
+
+Rolling video 也提供 runtime API，可在遊戲內依效能或隱私需求切換；切換不會修改 Settings asset：
+
+```csharp
+using MacacaGames.RuntimeBugReporter;
+
+BugReporter.SetVideoRecordingEnabled(false);
+bool enabled = BugReporter.IsVideoRecordingEnabled;
+```
+
+本專案另外以 `SROptions.MacacaBeacon.cs` 的 partial class 將同一個開關放入 `SRDebugger > Options > Macaca Beacon`，Beacon package 本身不引用 SRDebugger。
 
 ## 分享至其他專案
 
@@ -152,7 +168,7 @@ git commit -m "Update Macaca Beacon"
 "com.macacagames.beacon": "https://github.com/your-org/macaca-beacon.git?path=/com.macacagames.beacon#v0.1.0"
 ```
 
-套件 managed runtime assembly 沒有第三方相依；需要 Unity 的 IMGUI、UnityWebRequest、ScreenCapture 與 ImageConversion built-in modules。macOS／iOS MP4 backend 使用系統內建的 AVFoundation、VideoToolbox、CoreMedia、CoreVideo、CoreGraphics 與 ImageIO frameworks；Windows MP4 backend 使用系統內建的 Media Foundation、Windows Imaging Component 與 COM。
+套件 managed runtime assembly 沒有第三方相依；需要 Unity 的 IMGUI、UnityWebRequest、ScreenCapture 與 ImageConversion built-in modules。macOS／iOS MP4 backend 使用系統內建的 AVFoundation、VideoToolbox、CoreMedia 與 CoreVideo frameworks；Windows MP4 backend 使用系統內建的 Media Foundation 與 COM；Android MP4 backend 使用系統內建的 MediaCodec 與 MediaMuxer。ImageIO、WIC 與 Bitmap APIs 僅保留給 JPEG compatibility fallback。
 
 ## 參考
 

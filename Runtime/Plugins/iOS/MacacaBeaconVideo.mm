@@ -87,13 +87,7 @@ extern "C" __attribute__((visibility("default"))) void* MacacaBeaconVideo_Create
             AVVideoCodecKey: AVVideoCodecTypeH264,
             AVVideoWidthKey: @(session->width),
             AVVideoHeightKey: @(session->height),
-            AVVideoCompressionPropertiesKey: compression,
-            // The OS may temporarily reserve all hardware sessions (common while screen
-            // sharing). The software encoder is fast enough for Beacon's low capture FPS
-            // and is much more predictable in Editor and Player builds.
-            AVVideoEncoderSpecificationKey: @{
-                (__bridge NSString*)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: @NO
-            }
+            AVVideoCompressionPropertiesKey: compression
         };
 #else
         // iOS devices are optimized for the hardware H.264 path. Do not disable it as
@@ -107,7 +101,7 @@ extern "C" __attribute__((visibility("default"))) void* MacacaBeaconVideo_Create
 #endif
 
         session->input = [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeVideo outputSettings:settings];
-        session->input.expectsMediaDataInRealTime = NO;
+        session->input.expectsMediaDataInRealTime = YES;
         if (![session->writer canAddInput:session->input])
         {
             SetError(session, @"AVAssetWriter rejected its H.264 video input.");
@@ -225,6 +219,80 @@ extern "C" __attribute__((visibility("default"))) int MacacaBeaconVideo_AddJpeg(
         if (!appended)
         {
             SetWriterError(session, @"AVAssetWriter rejected a pixel buffer.");
+            return 0;
+        }
+
+        session->lastPresentationSeconds = presentationSeconds;
+        session->appendedFrames++;
+        return 1;
+    }
+}
+
+extern "C" __attribute__((visibility("default"))) int MacacaBeaconVideo_AddRgba(
+    void* handle,
+    const unsigned char* rgbaBytes,
+    int byteCount,
+    int sourceWidth,
+    int sourceHeight,
+    double presentationSeconds)
+{
+    @autoreleasepool
+    {
+        auto* session = static_cast<MacacaBeaconVideoSession*>(handle);
+        if (session == nullptr || !session->ready || rgbaBytes == nullptr ||
+            sourceWidth <= 0 || sourceHeight <= 0 ||
+            byteCount < sourceWidth * sourceHeight * 4)
+            return 0;
+        if (presentationSeconds + 0.000001 < session->lastPresentationSeconds)
+        {
+            SetError(session, @"Video frame timestamps must be monotonic.");
+            return 0;
+        }
+
+        CVPixelBufferRef pixelBuffer = nullptr;
+        CVReturn pixelResult = CVPixelBufferPoolCreatePixelBuffer(
+            kCFAllocatorDefault, session->adaptor.pixelBufferPool, &pixelBuffer);
+        if (pixelResult != kCVReturnSuccess || pixelBuffer == nullptr)
+        {
+            SetError(session, @"Could not allocate a raw video pixel buffer.");
+            return 0;
+        }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, 0);
+        auto* destination = static_cast<unsigned char*>(CVPixelBufferGetBaseAddress(pixelBuffer));
+        const size_t destinationStride = CVPixelBufferGetBytesPerRow(pixelBuffer);
+        for (int y = 0; y < session->height; ++y)
+        {
+            const int sourceY = std::min(sourceHeight - 1, y * sourceHeight / session->height);
+            auto* destinationRow = destination + static_cast<size_t>(y) * destinationStride;
+            for (int x = 0; x < session->width; ++x)
+            {
+                const int sourceX = std::min(sourceWidth - 1, x * sourceWidth / session->width);
+                const auto* source = rgbaBytes + (static_cast<size_t>(sourceY) * sourceWidth + sourceX) * 4;
+                auto* pixel = destinationRow + static_cast<size_t>(x) * 4;
+                pixel[0] = source[2];
+                pixel[1] = source[1];
+                pixel[2] = source[0];
+                pixel[3] = 255;
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+
+        for (int attempt = 0; attempt < 500 && !session->input.readyForMoreMediaData; ++attempt)
+            [NSThread sleepForTimeInterval:0.002];
+        if (!session->input.readyForMoreMediaData)
+        {
+            CVPixelBufferRelease(pixelBuffer);
+            SetError(session, @"The H.264 encoder did not become ready for a raw frame.");
+            return 0;
+        }
+
+        CMTime presentationTime = CMTimeMakeWithSeconds(std::max(0.0, presentationSeconds), 60000);
+        BOOL appended = [session->adaptor appendPixelBuffer:pixelBuffer withPresentationTime:presentationTime];
+        CVPixelBufferRelease(pixelBuffer);
+        if (!appended)
+        {
+            SetWriterError(session, @"AVAssetWriter rejected a raw pixel buffer.");
             return 0;
         }
 

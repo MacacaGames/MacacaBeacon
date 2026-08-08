@@ -66,7 +66,14 @@ namespace MacacaGames.RuntimeBugReporter
             {
                 var jpegFrames = new List<byte[]>(frames.Count);
                 for (var index = 0; index < frames.Count; index++)
-                    jpegFrames.Add(frames[index].JpegData);
+                {
+                    if (frames[index].Format != VideoCaptureFrameFormat.Jpeg)
+                    {
+                        error = "Legacy AVI fallback only supports JPEG capture frames.";
+                        return null;
+                    }
+                    jpegFrames.Add(frames[index].ReadData());
+                }
                 var bytes = MjpegAviEncoder.Encode(jpegFrames, width, height, framesPerSecond, (float)durationSeconds);
                 if (bytes == null || bytes.Length == 0)
                 {

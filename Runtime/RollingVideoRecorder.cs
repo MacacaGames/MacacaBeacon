@@ -19,8 +19,14 @@ namespace MacacaGames.RuntimeBugReporter
         private double incidentEndTime;
         private int capturedWidth;
         private int capturedHeight;
+        private Coroutine captureCoroutine;
+        private bool requestedEnabled;
+        private string frameCacheDirectory;
+        private long historyBytes;
 
         public bool IsFinalizing { get; private set; }
+        public bool IsEncoding { get; private set; }
+        public bool IsEnabled => requestedEnabled;
 
         public RollingVideoRecorder(MonoBehaviour host, BugReporterSettings settings)
         {
@@ -30,16 +36,29 @@ namespace MacacaGames.RuntimeBugReporter
 
         public void Start()
         {
-            if (settings.enableRollingVideo)
+            SetEnabled(settings.enableRollingVideo);
+        }
+
+        public void SetEnabled(bool enabled)
+        {
+            requestedEnabled = enabled;
+            if (enabled)
             {
-                captureStartedTime = Time.realtimeSinceStartupAsDouble;
-                host.StartCoroutine(CaptureLoop());
+                if (captureCoroutine == null)
+                {
+                    captureStartedTime = Time.realtimeSinceStartupAsDouble;
+                    captureCoroutine = host.StartCoroutine(CaptureLoop());
+                }
+            }
+            else if (!IsFinalizing)
+            {
+                StopCapture();
             }
         }
 
         public void MarkIncident(Action<VideoCaptureResult> completed)
         {
-            if (!settings.enableRollingVideo)
+            if (!requestedEnabled)
             {
                 completed?.Invoke(null);
                 return;
@@ -50,6 +69,12 @@ namespace MacacaGames.RuntimeBugReporter
             incidentCompleted = completed;
             incidentClipStartTime = Math.Max(captureStartedTime, incidentTime - settings.secondsBefore);
             incidentEndTime = incidentTime + settings.secondsAfter;
+            var availableSeconds = history.Count == 0
+                ? 0d
+                : Math.Max(0d, incidentTime - history.Peek().CapturedAt);
+            Debug.Log("[Macaca Beacon] Incident video window: requested before " + settings.secondsBefore.ToString("0.0") +
+                      "s, available before " + availableSeconds.ToString("0.0") + "s, frames " + history.Count +
+                      ", cache " + settings.maximumVideoCacheMegabytes + " MB.");
             IsFinalizing = true;
             if (settings.secondsAfter <= 0)
                 BeginFinishIncident();
@@ -63,24 +88,88 @@ namespace MacacaGames.RuntimeBugReporter
             while (true)
             {
                 yield return waitForFrame;
+                // Once the incident clip has collected its after-window, stop
+                // taking new screenshots while the encoder finalizes. This
+                // avoids competing with gameplay for GPU readback and JPEG
+                // compression time.
+                if (IsFinalizing && incidentFrames == null)
+                    continue;
                 if (Time.realtimeSinceStartup < nextCapture)
                     continue;
                 nextCapture = Time.realtimeSinceStartup + interval;
 
-                var frame = CaptureUtility.CaptureScaledJpeg(settings.videoWidth, settings.videoJpegQuality);
+                // JPEG encoding is intentionally kept on Unity's thread for
+                // platform safety. Do not start another readback when the
+                // previous game frame already missed the real-time budget;
+                // otherwise the recorder can keep the game at 30 FPS.
+                if (Application.targetFrameRate >= 50 && Time.unscaledDeltaTime > 0.025f)
+                    continue;
+
+                byte[] frame = null;
+                var frameWidth = 0;
+                var frameHeight = 0;
+                var frameFormat = VideoCaptureFrameFormat.Rgba32;
+                yield return CaptureUtility.CaptureScaledRgbaAsync(settings.videoWidth, (value, width, height) =>
+                {
+                    frame = value;
+                    frameWidth = width;
+                    frameHeight = height;
+                });
+                if (frame == null)
+                {
+                    frameFormat = VideoCaptureFrameFormat.Jpeg;
+                    yield return CaptureUtility.CaptureScaledJpegAsync(settings.videoWidth, settings.videoJpegQuality, value => frame = value);
+                    frameWidth = Mathf.Max(2, Mathf.Min(settings.videoWidth, Screen.width));
+                    frameWidth -= frameWidth % 2;
+                    frameHeight = Mathf.RoundToInt(Screen.height * (frameWidth / (float)Mathf.Max(1, Screen.width)));
+                    frameHeight -= frameHeight % 2;
+                }
                 if (frame == null)
                     continue;
 
-                capturedWidth = Mathf.Max(2, Mathf.Min(settings.videoWidth, Screen.width));
-                capturedWidth -= capturedWidth % 2;
-                capturedHeight = Mathf.RoundToInt(Screen.height * (capturedWidth / (float)Mathf.Max(1, Screen.width)));
-                capturedHeight -= capturedHeight % 2;
+                capturedWidth = frameWidth;
+                capturedHeight = frameHeight;
 
-                var capturedFrame = new VideoCaptureFrame(frame, Time.realtimeSinceStartupAsDouble);
+                VideoCaptureFrame capturedFrame;
+                if (frameFormat == VideoCaptureFrameFormat.Rgba32)
+                {
+                    if (string.IsNullOrEmpty(frameCacheDirectory))
+                    {
+                        frameCacheDirectory = Path.Combine(Application.temporaryCachePath, "MacacaBeacon", "RollingFrames-" + Guid.NewGuid().ToString("N"));
+                        Directory.CreateDirectory(frameCacheDirectory);
+                    }
+
+                    var framePath = Path.Combine(frameCacheDirectory, Guid.NewGuid().ToString("N") + ".rgba");
+                    var writeTask = Task.Run(() => File.WriteAllBytes(framePath, frame));
+                    while (!writeTask.IsCompleted)
+                        yield return null;
+                    if (writeTask.IsFaulted)
+                    {
+                        Debug.LogWarning("[Macaca Beacon] Could not cache a rolling video frame: " + writeTask.Exception?.GetBaseException().Message);
+                        continue;
+                    }
+                    capturedFrame = new VideoCaptureFrame(framePath, frameFormat, frameWidth, frameHeight, frame.Length, Time.realtimeSinceStartupAsDouble);
+                }
+                else
+                {
+                    capturedFrame = new VideoCaptureFrame(frame, Time.realtimeSinceStartupAsDouble);
+                }
+
                 history.Enqueue(capturedFrame);
+                historyBytes += capturedFrame.ByteCount;
                 var historyCutoff = capturedFrame.CapturedAt - Mathf.Max(1, settings.secondsBefore);
-                while (history.Count > 0 && history.Peek().CapturedAt < historyCutoff)
-                    history.Dequeue();
+                var configuredCacheMegabytes = settings.maximumVideoCacheMegabytes > 0
+                    ? settings.maximumVideoCacheMegabytes
+                    : 512;
+                var maximumCacheBytes = Math.Max(32L, configuredCacheMegabytes) * 1024L * 1024L;
+                while (history.Count > 0 &&
+                       (history.Peek().CapturedAt < historyCutoff || historyBytes > maximumCacheBytes))
+                {
+                    var expired = history.Dequeue();
+                    historyBytes -= expired.ByteCount;
+                    if (!IsFinalizing)
+                        expired.DeleteDataFile();
+                }
 
                 if (incidentFrames == null)
                     continue;
@@ -91,6 +180,18 @@ namespace MacacaGames.RuntimeBugReporter
             }
         }
 
+        private void StopCapture()
+        {
+            if (captureCoroutine != null)
+            {
+                host.StopCoroutine(captureCoroutine);
+                captureCoroutine = null;
+            }
+            history.Clear();
+            historyBytes = 0;
+            DeleteFrameCache();
+        }
+
         private void BeginFinishIncident()
         {
             if (incidentFrames == null)
@@ -99,6 +200,7 @@ namespace MacacaGames.RuntimeBugReporter
             var completed = incidentCompleted;
             incidentFrames = null;
             incidentCompleted = null;
+            IsEncoding = true;
             host.StartCoroutine(FinishIncident(frames, completed));
         }
 
@@ -109,6 +211,42 @@ namespace MacacaGames.RuntimeBugReporter
             Directory.CreateDirectory(captureDirectory);
             var outputStem = Path.Combine(captureDirectory, "incident-" + Guid.NewGuid().ToString("N"));
             string encoderError = null;
+            VideoCaptureResult result = null;
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (settings.preferMp4 && BugReporter.VideoEncoderOverride == null && AreRawFileFrames(frames))
+            {
+                var androidEncoder = new AndroidMediaCodecMp4Encoder();
+                yield return androidEncoder.TryEncodeRawFilesAsync(
+                    outputStem + androidEncoder.Extension,
+                    frames,
+                    capturedWidth,
+                    capturedHeight,
+                    settings.videoFramesPerSecond,
+                    settings.videoBitrateKbps,
+                    durationSeconds,
+                    (value, error) =>
+                    {
+                        result = value;
+                        encoderError = error;
+                    });
+            }
+            else
+            {
+                // Compatibility/custom encoders keep the synchronous contract.
+                // The normal RGBA Android path above runs wholly in a Java worker.
+                result = VideoEncoderBackend.Encode(
+                    outputStem,
+                    frames,
+                    capturedWidth,
+                    capturedHeight,
+                    settings.videoFramesPerSecond,
+                    settings.videoBitrateKbps,
+                    durationSeconds,
+                    settings.preferMp4,
+                    settings.allowLegacyAviFallback,
+                    out encoderError);
+            }
+#else
             var task = Task.Run(() => VideoEncoderBackend.Encode(
                 outputStem,
                 frames,
@@ -124,7 +262,6 @@ namespace MacacaGames.RuntimeBugReporter
             while (!task.IsCompleted)
                 yield return null;
 
-            VideoCaptureResult result = null;
             if (task.IsFaulted)
             {
                 Debug.LogException(task.Exception);
@@ -133,8 +270,15 @@ namespace MacacaGames.RuntimeBugReporter
             {
                 result = task.Result;
             }
+#endif
+
+            // Keep this method an iterator on Android too, where encoding is
+            // intentionally performed synchronously on Unity's main thread
+            // to keep Android JNI calls safe.
+            yield return null;
 
             IsFinalizing = false;
+            IsEncoding = false;
             if (result == null)
             {
                 Debug.LogWarning("[Macaca Beacon] Video finalization failed: " + (encoderError ?? "unknown encoder error"));
@@ -144,6 +288,41 @@ namespace MacacaGames.RuntimeBugReporter
                 Debug.Log("[Macaca Beacon] Video finalized by " + result.EncoderName + ": " + result.FrameCount + " frames over " + result.DurationSeconds.ToString("0.00") + " seconds at " + result.FilePath);
             }
             completed?.Invoke(result);
+            DeleteFrameCache();
+            history.Clear();
+            historyBytes = 0;
+            captureStartedTime = Time.realtimeSinceStartupAsDouble;
+            if (!requestedEnabled)
+                StopCapture();
+        }
+
+        private void DeleteFrameCache()
+        {
+            if (string.IsNullOrEmpty(frameCacheDirectory))
+                return;
+            try
+            {
+                if (Directory.Exists(frameCacheDirectory))
+                    Directory.Delete(frameCacheDirectory, true);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("[Macaca Beacon] Could not clean rolling frame cache: " + exception.Message);
+            }
+            frameCacheDirectory = null;
+        }
+
+        private static bool AreRawFileFrames(IReadOnlyList<VideoCaptureFrame> frames)
+        {
+            if (frames == null || frames.Count == 0)
+                return false;
+            for (var index = 0; index < frames.Count; index++)
+            {
+                if (frames[index].Format != VideoCaptureFrameFormat.Rgba32 ||
+                    string.IsNullOrEmpty(frames[index].DataFilePath))
+                    return false;
+            }
+            return true;
         }
 
     }

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0
+
+- Replaced the normal rolling JPEG capture path with asynchronous RGBA GPU readback cached to temporary files.
+- Added raw RGBA inputs to the Android MediaCodec, Apple AVAssetWriter, and Windows Media Foundation H.264 backends.
+- Restored AVAssetWriter's automatic hardware/software encoder selection and enabled real-time input pacing on Apple platforms.
+- Corrected vertical orientation for raw RGBA video encoded by AVAssetWriter on macOS and iOS.
+- Moved Android raw-frame MediaCodec finalization to a Java worker job so report form input remains responsive while video encoding runs.
+- Increased the default raw cache to 512 MB and added requested-versus-available history logging for portrait captures.
+- Kept JPEG/MJPEG only as a compatibility fallback when asynchronous GPU readback is unavailable.
+
 ## [0.4.0] - 2026-08-08
 
 - Added an iOS AVAssetWriter H.264 MP4 backend compiled directly into Unity's generated Xcode project through `__Internal`.

@@ -154,10 +154,43 @@ namespace MacacaGames.RuntimeBugReporter
             builder.Append("*ID:* `").Append(report.Id).Append("`  *Category:* ").Append(SlackEscape(report.Category)).Append('\n');
             if (!string.IsNullOrWhiteSpace(report.Reporter))
                 builder.Append("*Reporter:* ").Append(SlackEscape(report.Reporter)).Append('\n');
-            builder.Append("*Description*\n").Append(SlackEscape(report.Description)).Append('\n');
+            builder.Append("*Description:*\n").Append(SlackEscape(report.Description)).Append('\n');
+
+            // Keep the high-signal context visible in the notification without making
+            // the report header unnecessarily tall. The full diagnostics attachment
+            // still contains the same values plus graphics and display details.
+            AppendCompactFields(builder, report, "Build", "Scene", "UTC");
+            AppendCompactFields(builder, report, "Device Model", "CPU", "RAM", "OS", "GPU");
+
             foreach (var field in report.Fields)
+            {
+                if (field.Key == "Build" || field.Key == "Scene" || field.Key == "UTC" ||
+                    field.Key == "Device Model" || field.Key == "CPU" || field.Key == "RAM" ||
+                    field.Key == "OS" || field.Key == "GPU")
+                    continue;
+
                 builder.Append("*").Append(SlackEscape(field.Key)).Append(":* ").Append(SlackEscape(field.Value)).Append('\n');
+            }
             return builder.ToString();
+        }
+
+        private static void AppendCompactFields(StringBuilder builder, BugReport report, params string[] keys)
+        {
+            var hasValue = false;
+            foreach (var key in keys)
+            {
+                string value;
+                if (!report.Fields.TryGetValue(key, out value) || string.IsNullOrWhiteSpace(value))
+                    continue;
+
+                if (hasValue)
+                    builder.Append("  •  ");
+                builder.Append("*").Append(SlackEscape(key)).Append(":* ").Append(SlackEscape(value));
+                hasValue = true;
+            }
+
+            if (hasValue)
+                builder.Append('\n');
         }
 
         private static string BuildCompleteUploadPayload(List<UploadedFile> files, string channel, string threadTs, string comment)

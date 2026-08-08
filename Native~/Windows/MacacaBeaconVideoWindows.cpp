@@ -372,6 +372,38 @@ extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_AddJpeg(
     return WriteFrame(session, pixels, presentationSeconds) ? 1 : 0;
 }
 
+extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_AddRgba(
+    void* pointer,
+    const uint8_t* rgbaBytes,
+    int byteCount,
+    int sourceWidth,
+    int sourceHeight,
+    double presentationSeconds)
+{
+    EncoderSession* session = static_cast<EncoderSession*>(pointer);
+    if (session == nullptr || !session->ready || session->finalized || rgbaBytes == nullptr ||
+        sourceWidth <= 0 || sourceHeight <= 0 ||
+        byteCount < sourceWidth * sourceHeight * 4)
+        return 0;
+
+    std::vector<uint8_t> pixels(static_cast<size_t>(session->width) * session->height * 4);
+    for (int y = 0; y < session->height; ++y)
+    {
+        const int sourceY = std::min(sourceHeight - 1, y * sourceHeight / session->height);
+        for (int x = 0; x < session->width; ++x)
+        {
+            const int sourceX = std::min(sourceWidth - 1, x * sourceWidth / session->width);
+            const uint8_t* source = rgbaBytes + (static_cast<size_t>(sourceY) * sourceWidth + sourceX) * 4;
+            uint8_t* destination = pixels.data() + (static_cast<size_t>(y) * session->width + x) * 4;
+            destination[0] = source[2];
+            destination[1] = source[1];
+            destination[2] = source[0];
+            destination[3] = 255;
+        }
+    }
+    return WriteFrame(session, pixels, presentationSeconds) ? 1 : 0;
+}
+
 extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_Finish(void* pointer)
 {
     EncoderSession* session = static_cast<EncoderSession*>(pointer);

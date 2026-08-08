@@ -48,17 +48,21 @@ namespace MacacaGames.RuntimeBugReporter
                 for (var index = 0; index < frames.Count; index++)
                 {
                     var frame = frames[index];
-                    if (frame.JpegData == null || frame.JpegData.Length == 0)
+                    var frameData = frame.ReadData();
+                    if (frameData == null || frameData.Length == 0)
                         continue;
 
                     var presentationTime = Math.Max(0d, frame.CapturedAt - sourceStart);
-                    if (NativeAddJpeg(session, frame.JpegData, frame.JpegData.Length, presentationTime) == 0)
+                    var added = frame.Format == VideoCaptureFrameFormat.Rgba32
+                        ? NativeAddRgba(session, frameData, frameData.Length, frame.Width, frame.Height, presentationTime)
+                        : NativeAddJpeg(session, frameData, frameData.Length, presentationTime);
+                    if (added == 0)
                     {
                         error = LastError(session, "Media Foundation rejected a captured frame.");
                         return false;
                     }
                     lastPresentationTime = presentationTime;
-                    lastFrame = frame.JpegData;
+                    lastFrame = frameData;
                 }
 
                 if (lastFrame == null)
@@ -71,7 +75,11 @@ namespace MacacaGames.RuntimeBugReporter
                 // before/after duration even when Unity cannot capture at the configured FPS.
                 if (lastFrame != null && durationSeconds > lastPresentationTime + (0.5d / Math.Max(1, framesPerSecond)))
                 {
-                    if (NativeAddJpeg(session, lastFrame, lastFrame.Length, durationSeconds) == 0)
+                    var finalFrame = frames[frames.Count - 1];
+                    var added = finalFrame.Format == VideoCaptureFrameFormat.Rgba32
+                        ? NativeAddRgba(session, lastFrame, lastFrame.Length, finalFrame.Width, finalFrame.Height, durationSeconds)
+                        : NativeAddJpeg(session, lastFrame, lastFrame.Length, durationSeconds);
+                    if (added == 0)
                     {
                         error = LastError(session, "Media Foundation could not extend the final frame duration.");
                         return false;
@@ -116,6 +124,9 @@ namespace MacacaGames.RuntimeBugReporter
 
         [DllImport("MacacaBeaconVideoWindows", EntryPoint = "MacacaBeaconWindowsVideo_AddJpeg", CallingConvention = CallingConvention.Cdecl)]
         private static extern int NativeAddJpeg(IntPtr session, byte[] jpegBytes, int byteCount, double presentationSeconds);
+
+        [DllImport("MacacaBeaconVideoWindows", EntryPoint = "MacacaBeaconWindowsVideo_AddRgba", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int NativeAddRgba(IntPtr session, byte[] rgbaBytes, int byteCount, int width, int height, double presentationSeconds);
 
         [DllImport("MacacaBeaconVideoWindows", EntryPoint = "MacacaBeaconWindowsVideo_Finish", CallingConvention = CallingConvention.Cdecl)]
         private static extern int NativeFinish(IntPtr session);

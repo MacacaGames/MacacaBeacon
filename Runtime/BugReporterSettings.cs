@@ -51,18 +51,20 @@ namespace MacacaGames.RuntimeBugReporter
         [Min(20)] public int maximumLogEntries = 200;
 
         [Header("Rolling video (optional)")]
-        [Tooltip("Continuously keeps low-rate frames in memory. On macOS and iOS they are finalized as H.264 MP4; unsupported platforms can use the legacy AVI fallback.")]
+        [Tooltip("Continuously caches low-rate raw frames on disk. Supported platforms finalize them as hardware H.264 MP4; JPEG/AVI is compatibility-only.")]
         public bool enableRollingVideo = true;
         [Tooltip("Prefer a Slack-friendly H.264 MP4 when a runtime encoder backend is available.")]
         public bool preferMp4 = true;
         [Tooltip("Use managed MJPEG AVI when this platform has no MP4 backend or MP4 encoding fails.")]
         public bool allowLegacyAviFallback = true;
-        [Range(1, 15)] public int videoFramesPerSecond = 12;
-        [Range(1, 10)] public int secondsBefore = 10;
-        [Range(0, 10)] public int secondsAfter = 1;
+        [Range(1, 24)] public int videoFramesPerSecond = 15;
+        [Range(1, 10)] public int secondsBefore = 15;
+        [Range(0, 5)] public int secondsAfter = 1;
         [Range(320, 1920)] public int videoWidth = 960;
         [Range(20, 90)] public int videoJpegQuality = 65;
         [Range(128, 8000)] public int videoBitrateKbps = 1500;
+        [Tooltip("Maximum temporary disk space for raw rolling frames. Use at least 512 MB for 960 px wide portrait video at 6 FPS and an 8 second history.")]
+        [Range(32, 2048)] public int maximumVideoCacheMegabytes = 512;
         [Range(1, 100)] public int maximumAttachmentMegabytes = 25;
 
         [Header("Local fallback")]

@@ -12,6 +12,19 @@ namespace MacacaGames.RuntimeBugReporter
 
         public static bool IsOpen => BugReporterController.Instance != null && BugReporterController.Instance.IsOpen;
 
+        /// <summary>
+        /// Gets whether the rolling video recorder is currently enabled.
+        /// </summary>
+        public static bool IsVideoRecordingEnabled
+        {
+            get
+            {
+                if (BugReporterController.Instance != null)
+                    return BugReporterController.Instance.IsVideoRecordingEnabled;
+                return BugReporterSettings.LoadOrDefault().enableRollingVideo;
+            }
+        }
+
         public static void Open()
         {
             EnsureController();
@@ -22,6 +35,16 @@ namespace MacacaGames.RuntimeBugReporter
         {
             if (BugReporterController.Instance != null)
                 BugReporterController.Instance.Close();
+        }
+
+        /// <summary>
+        /// Enables or disables rolling video capture at runtime. The setting
+        /// is session-only and does not modify the project asset.
+        /// </summary>
+        public static void SetVideoRecordingEnabled(bool enabled)
+        {
+            EnsureController();
+            BugReporterController.Instance.SetVideoRecordingEnabled(enabled);
         }
 
         public static void RegisterDataProvider(IBugReportDataProvider provider)

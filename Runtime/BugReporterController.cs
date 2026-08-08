@@ -13,6 +13,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         internal static BugReporterController Instance { get; private set; }
         internal bool IsOpen { get; private set; }
+        internal bool IsVideoRecordingEnabled => videoRecorder != null && videoRecorder.IsEnabled;
 
         private BugReporterSettings settings;
         private RecentLogCollector logs;
@@ -64,6 +65,7 @@ namespace MacacaGames.RuntimeBugReporter
         // all have useful minimum widths. Keep portrait and split-screen views
         // stacked so the form never collapses into a clipped sliver.
         private const float DesktopLayoutMinimumWidth = 1120f;
+        private const float MobileLayoutMaximumWidth = 720f;
 
         internal void Initialize(BugReporterSettings value)
         {
@@ -92,6 +94,11 @@ namespace MacacaGames.RuntimeBugReporter
             status = "";
         }
 
+        internal void SetVideoRecordingEnabled(bool enabled)
+        {
+            videoRecorder?.SetEnabled(enabled);
+        }
+
         private void Awake()
         {
             if (Instance != null && Instance != this)
@@ -112,6 +119,11 @@ namespace MacacaGames.RuntimeBugReporter
 
         private void Update()
         {
+            if (IsOpen && !isSending && videoCapture == null && videoRecorder != null && videoRecorder.IsEncoding)
+            {
+                statusIsError = false;
+                status = "Encoding video in the background — you can keep typing.";
+            }
 #if UNITY_IOS || UNITY_ANDROID
             if (settings == null || IsOpen || isOpening || !settings.mobileThreeFingerGesture)
             {
@@ -215,7 +227,7 @@ namespace MacacaGames.RuntimeBugReporter
                 current.Use();
             }
 
-            var uiScale = Mathf.Clamp(Mathf.Min(Screen.width / 1280f, Screen.height / 900f), 0.9f, 1.25f) * settings.interfaceScale;
+            var uiScale = GetUiScale();
             EnsureStyles(uiScale);
             GUI.depth = -10000;
             var overlay = new Rect(0, 0, Screen.width, Screen.height);
@@ -227,9 +239,9 @@ namespace MacacaGames.RuntimeBugReporter
             float height;
             if (settings.fullscreen)
             {
-                width = Screen.width;
-                height = Screen.height;
-                windowRect = new Rect(0f, 0f, width, height);
+                windowRect = GetSafeAreaGuiRect();
+                width = windowRect.width;
+                height = windowRect.height;
             }
             else
             {
@@ -279,15 +291,22 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.BeginHorizontal();
             GUILayout.Space(28 * styleScale);
             GUI.enabled = !isSending;
-            if (GUILayout.Button("CANCEL", buttonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(120 * styleScale))) Close();
+            if (GUILayout.Button("CANCEL", buttonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(IsMobileLayout() ? 104 * styleScale : 120 * styleScale))) Close();
             GUI.enabled = true;
             GUILayout.FlexibleSpace();
-            GUILayout.Label("Ctrl / Cmd + Enter", hintStyle, GUILayout.Width(142 * styleScale));
+            if (!IsMobileLayout())
+                GUILayout.Label("Ctrl / Cmd + Enter", hintStyle, GUILayout.Width(142 * styleScale));
             var videoPending = settings.enableRollingVideo && videoRecorder.IsFinalizing;
             var canSend = !isSending && !videoPending;
             GUI.enabled = canSend;
-            var sendLabel = isSending ? "SENDING…" : videoPending ? "FINISHING VIDEO…" : "SEND TO SLACK";
-            if (GUILayout.Button(sendLabel, primaryButtonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(190 * styleScale)))
+            var sendLabel = isSending
+                ? "SENDING…"
+                : videoRecorder.IsEncoding
+                    ? "ENCODING VIDEO…"
+                    : videoPending
+                        ? "RECORDING VIDEO…"
+                        : "SEND TO SLACK";
+            if (GUILayout.Button(sendLabel, primaryButtonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(IsMobileLayout() ? 164 * styleScale : 190 * styleScale)))
                 TryBeginSend();
             GUI.enabled = true;
             GUILayout.Space(28 * styleScale);
@@ -303,7 +322,7 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.BeginHorizontal(GUILayout.ExpandHeight(true));
             GUILayout.Space(28 * styleScale);
             GUILayout.BeginVertical(cardStyle, GUILayout.Width(leftWidth), GUILayout.ExpandHeight(true));
-            DrawScreenshotPanel(Mathf.Clamp(windowRect.height * 0.50f, 360f, 560f));
+            DrawScreenshotPanel(Mathf.Clamp(windowRect.height * 0.36f, 300f, 480f));
             GUILayout.Space(16 * styleScale);
             DrawCaptureSummary();
             GUILayout.FlexibleSpace();
@@ -324,13 +343,43 @@ namespace MacacaGames.RuntimeBugReporter
             return windowRect.width >= DesktopLayoutMinimumWidth && windowRect.height >= 720f;
         }
 
+        private bool IsMobileLayout()
+        {
+            return windowRect.width <= MobileLayoutMaximumWidth;
+        }
+
+        private float GetUiScale()
+        {
+            var viewportScale = Mathf.Min(Screen.width / 1280f, Screen.height / 900f);
+            if (Screen.width <= MobileLayoutMaximumWidth)
+            {
+                // Mobile GUI text should follow readable touch targets rather
+                // than shrinking with the raw pixel resolution.
+                var mobileScale = Mathf.Clamp(Mathf.Min(Screen.width / 420f, Screen.height / 740f), 0.98f, 1.12f);
+                return settings.interfaceScale * mobileScale;
+            }
+            return Mathf.Clamp(viewportScale, 0.9f, 1.25f) * settings.interfaceScale;
+        }
+
+        private Rect GetSafeAreaGuiRect()
+        {
+            var safeArea = Screen.safeArea;
+            var topLeftY = Screen.height - safeArea.yMax;
+            var inset = Screen.width <= MobileLayoutMaximumWidth ? 8f : 0f;
+            return new Rect(
+                safeArea.xMin + inset,
+                topLeftY + inset,
+                Mathf.Max(1f, safeArea.width - inset * 2f),
+                Mathf.Max(1f, safeArea.height - inset * 2f));
+        }
+
         private void DrawCompactContent()
         {
             GUILayout.BeginHorizontal();
             GUILayout.Space(28 * styleScale);
             GUILayout.BeginVertical(cardStyle, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
             formScroll = GUILayout.BeginScrollView(formScroll, false, true, GUILayout.ExpandHeight(true));
-            DrawScreenshotPanel(Mathf.Clamp(windowRect.width * 0.42f, 360f, 520f));
+            DrawScreenshotPanel(Mathf.Clamp(windowRect.width * 0.58f, 200f, 460f));
             GUILayout.Space(14 * styleScale);
             DrawCaptureSummary();
             GUILayout.Space(18 * styleScale);
@@ -381,22 +430,24 @@ namespace MacacaGames.RuntimeBugReporter
                 GUILayout.Label("DRAW ON THE SCREENSHOT", labelStyle);
                 GUILayout.Space(6 * styleScale);
             }
-            GUILayout.BeginHorizontal();
-            if (!compact)
+            if (compact)
             {
+                GUILayout.BeginHorizontal();
+                DrawAnnotationButton("UNDO", canInteract && screenshotAnnotator.CanUndo, () => screenshotAnnotator.Undo());
+                DrawAnnotationButton("CLEAR", canInteract && screenshotAnnotator.HasAnnotations, () => screenshotAnnotator.Clear());
+                GUILayout.EndHorizontal();
+                DrawAnnotationButton("RECAPTURE SCREENSHOT", canInteract, () => StartCoroutine(RecaptureScreenshot()));
+            }
+            else
+            {
+                GUILayout.BeginHorizontal();
                 GUILayout.Label("DRAW ON THE SCREENSHOT", labelStyle);
                 GUILayout.FlexibleSpace();
+                DrawAnnotationButton("UNDO", canInteract && screenshotAnnotator.CanUndo, () => screenshotAnnotator.Undo(), 96 * styleScale);
+                DrawAnnotationButton("CLEAR", canInteract && screenshotAnnotator.HasAnnotations, () => screenshotAnnotator.Clear(), 96 * styleScale);
+                DrawAnnotationButton("RECAPTURE", canInteract, () => StartCoroutine(RecaptureScreenshot()), 112 * styleScale);
+                GUILayout.EndHorizontal();
             }
-            GUI.enabled = canInteract && screenshotAnnotator.CanUndo;
-            if (GUILayout.Button("UNDO", buttonStyle, compact ? GUILayout.ExpandWidth(true) : GUILayout.Width(96 * styleScale), GUILayout.Height(44 * styleScale)))
-                screenshotAnnotator.Undo();
-            GUI.enabled = canInteract && screenshotAnnotator.HasAnnotations;
-            if (GUILayout.Button("CLEAR", buttonStyle, compact ? GUILayout.ExpandWidth(true) : GUILayout.Width(96 * styleScale), GUILayout.Height(44 * styleScale)))
-                screenshotAnnotator.Clear();
-            GUI.enabled = canInteract;
-            if (GUILayout.Button("RECAPTURE", buttonStyle, compact ? GUILayout.ExpandWidth(true) : GUILayout.Width(112 * styleScale), GUILayout.Height(44 * styleScale)))
-                StartCoroutine(RecaptureScreenshot());
-            GUILayout.EndHorizontal();
             GUILayout.Space(8 * styleScale);
 
             if (compact)
@@ -413,6 +464,17 @@ namespace MacacaGames.RuntimeBugReporter
                 annotationSizeIndex = GUILayout.SelectionGrid(annotationSizeIndex, AnnotationSizeLabels, 3, categoryStyle, GUILayout.Width(210 * styleScale), GUILayout.Height(44 * styleScale));
                 GUILayout.EndHorizontal();
             }
+        }
+
+        private void DrawAnnotationButton(string label, bool enabled, Action action, float width = -1f)
+        {
+            GUI.enabled = enabled;
+            var clicked = width > 0f
+                ? GUILayout.Button(label, buttonStyle, GUILayout.Width(width), GUILayout.Height(44 * styleScale))
+                : GUILayout.Button(label, buttonStyle, GUILayout.ExpandWidth(true), GUILayout.Height(44 * styleScale));
+            if (clicked)
+                action();
+            GUI.enabled = true;
         }
 
         private void HandleScreenshotAnnotation(Rect imageRect)
@@ -477,7 +539,15 @@ namespace MacacaGames.RuntimeBugReporter
             var screenshotState = settings.includeScreenshot && screenshotBytes != null
                 ? screenshotAnnotator != null && screenshotAnnotator.HasAnnotations ? "[READY] Screenshot + annotations" : "[READY] Screenshot"
                 : "[OFF] Screenshot";
-            var videoState = !settings.enableRollingVideo ? "[OFF] Video" : videoRecorder.IsFinalizing ? "[WAIT] Video recording" : videoCapture != null ? "[READY] " + videoCapture.Extension.TrimStart('.').ToUpperInvariant() + " video" : "[OFF] Video unavailable";
+            var videoState = !settings.enableRollingVideo
+                ? "[OFF] Video"
+                : videoRecorder.IsEncoding
+                    ? "[WAIT] Video encoding in background"
+                    : videoRecorder.IsFinalizing
+                        ? "[WAIT] Video recording"
+                        : videoCapture != null
+                            ? "[READY] " + videoCapture.Extension.TrimStart('.').ToUpperInvariant() + " video"
+                            : "[OFF] Video unavailable";
             var logState = settings.includeRecentLogs ? "[READY] Recent logs" : "[OFF] Recent logs";
             GUILayout.Label(screenshotState + "\n" + videoState + "\n" + logState, hintStyle);
         }
@@ -486,8 +556,9 @@ namespace MacacaGames.RuntimeBugReporter
         {
             DrawLabel("CATEGORY");
             var categories = SafeCategories();
-            var rows = Mathf.CeilToInt(categories.Length / 3f);
-            categoryIndex = GUILayout.SelectionGrid(categoryIndex, categories, 3, categoryStyle, GUILayout.Height(rows * 48f * styleScale));
+            var columns = compact && windowRect.width < 560f ? 2 : 3;
+            var rows = Mathf.CeilToInt(categories.Length / (float)columns);
+            categoryIndex = GUILayout.SelectionGrid(categoryIndex, categories, columns, categoryStyle, GUILayout.Height(rows * 48f * styleScale));
             GUILayout.Space(14 * styleScale);
 
             DrawLabel("TITLE  *");
@@ -610,6 +681,11 @@ namespace MacacaGames.RuntimeBugReporter
             report.Fields["Build"] = BuildVersionLabel();
             report.Fields["Scene"] = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
             report.Fields["UTC"] = report.CreatedUtc.ToString("O");
+            report.Fields["Device Model"] = SystemInfo.deviceModel;
+            report.Fields["CPU"] = SystemInfo.processorType + " (" + SystemInfo.processorCount + " cores)";
+            report.Fields["RAM"] = SystemInfo.systemMemorySize + " MB";
+            report.Fields["OS"] = SystemInfo.operatingSystem;
+            report.Fields["GPU"] = SystemInfo.graphicsDeviceName;
 
             if (settings.includeScreenshot && screenshotBytes != null)
             {
@@ -618,7 +694,7 @@ namespace MacacaGames.RuntimeBugReporter
                     : screenshotBytes;
                 AddAttachmentIfAllowed(report, new BugReportAttachment("bug-" + report.Id + ".png", "image/png", finalScreenshot, "Game screenshot at report time with optional annotations"));
             }
-            if (settings.enableRollingVideo && videoCapture != null)
+            if (videoCapture != null)
             {
                 var videoAttachment = BugReportAttachment.FromFile(
                     "bug-" + report.Id + videoCapture.Extension,
@@ -666,6 +742,7 @@ namespace MacacaGames.RuntimeBugReporter
                 builder.AppendLine("Unity: " + Application.unityVersion);
                 builder.AppendLine("Platform: " + Application.platform);
                 builder.AppendLine("OS: " + SystemInfo.operatingSystem);
+                builder.AppendLine("Device Model: " + SystemInfo.deviceModel);
                 builder.AppendLine("CPU: " + SystemInfo.processorType + " (" + SystemInfo.processorCount + " cores)");
                 builder.AppendLine("RAM: " + SystemInfo.systemMemorySize + " MB");
                 builder.AppendLine("GPU: " + SystemInfo.graphicsDeviceName + " / " + SystemInfo.graphicsDeviceVersion);
@@ -694,12 +771,11 @@ namespace MacacaGames.RuntimeBugReporter
 #if UNITY_ANDROID && !UNITY_EDITOR
             try
             {
-                using (var unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer"))
-                using (var activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity"))
-                using (var packageManager = activity.Call<AndroidJavaObject>("getPackageManager"))
-                using (var packageInfo = packageManager.Call<AndroidJavaObject>("getPackageInfo", activity.Call<string>("getPackageName"), 0))
+                using (var bridge = new AndroidJavaClass("com.macacagames.beacon.MacacaBeaconVideo"))
                 {
-                    return version + " (Code: " + packageInfo.Get<int>("versionCode") + ")";
+                    var versionCode = bridge.CallStatic<int>("getVersionCode");
+                    if (versionCode >= 0)
+                        return version + " (Code: " + versionCode + ")";
                 }
             }
             catch (Exception exception)
@@ -757,7 +833,7 @@ namespace MacacaGames.RuntimeBugReporter
 
             titleStyle = new GUIStyle(GUI.skin.label)
             {
-                fontSize = Mathf.RoundToInt(26 * scale),
+                fontSize = Mathf.RoundToInt(30 * scale),
                 fontStyle = FontStyle.Bold,
                 alignment = TextAnchor.MiddleLeft,
                 margin = new RectOffset(0, 0, 0, 0)
@@ -766,7 +842,7 @@ namespace MacacaGames.RuntimeBugReporter
 
             subtitleStyle = new GUIStyle(GUI.skin.label)
             {
-                fontSize = Mathf.RoundToInt(13 * scale),
+                fontSize = Mathf.RoundToInt(15 * scale),
                 alignment = TextAnchor.MiddleLeft,
                 margin = new RectOffset(0, 0, 2, 0)
             };
@@ -774,7 +850,7 @@ namespace MacacaGames.RuntimeBugReporter
 
             labelStyle = new GUIStyle(GUI.skin.label)
             {
-                fontSize = Mathf.RoundToInt(12 * scale),
+                fontSize = Mathf.RoundToInt(14 * scale),
                 fontStyle = FontStyle.Bold,
                 margin = new RectOffset(0, 0, Mathf.RoundToInt(3 * scale), Mathf.RoundToInt(7 * scale))
             };
@@ -782,7 +858,7 @@ namespace MacacaGames.RuntimeBugReporter
 
             hintStyle = new GUIStyle(GUI.skin.label)
             {
-                fontSize = Mathf.RoundToInt(13 * scale),
+                fontSize = Mathf.RoundToInt(15 * scale),
                 wordWrap = true,
                 alignment = TextAnchor.MiddleLeft
             };
@@ -797,7 +873,7 @@ namespace MacacaGames.RuntimeBugReporter
 
             fieldStyle = new GUIStyle(GUI.skin.textField)
             {
-                fontSize = Mathf.RoundToInt(16 * scale),
+                fontSize = Mathf.RoundToInt(18 * scale),
                 padding = new RectOffset(Mathf.RoundToInt(14 * scale), Mathf.RoundToInt(14 * scale), Mathf.RoundToInt(12 * scale), Mathf.RoundToInt(10 * scale))
             };
             fieldStyle.normal.background = field;
@@ -817,8 +893,8 @@ namespace MacacaGames.RuntimeBugReporter
             categoryStyle.margin = new RectOffset(4, 4, 4, 4);
 
             primaryButtonStyle = CreateButtonStyle(scale, accent, accentHover, accentActive, new Color(0.17f, 0.15f, 0.13f));
-            primaryButtonStyle.fontSize = Mathf.RoundToInt(14 * scale);
-            closeButtonStyle = new GUIStyle(buttonStyle) { fontSize = Mathf.RoundToInt(12 * scale) };
+            primaryButtonStyle.fontSize = Mathf.RoundToInt(16 * scale);
+            closeButtonStyle = new GUIStyle(buttonStyle) { fontSize = Mathf.RoundToInt(14 * scale) };
 
             statusStyle = new GUIStyle(hintStyle) { fontStyle = FontStyle.Bold };
             statusStyle.normal.textColor = new Color(0.09f, 0.48f, 0.50f);
@@ -860,7 +936,7 @@ namespace MacacaGames.RuntimeBugReporter
         {
             var style = new GUIStyle(GUI.skin.button)
             {
-                fontSize = Mathf.RoundToInt(13 * scale),
+                fontSize = Mathf.RoundToInt(15 * scale),
                 fontStyle = FontStyle.Bold,
                 alignment = TextAnchor.MiddleCenter,
                 padding = new RectOffset(Mathf.RoundToInt(12 * scale), Mathf.RoundToInt(12 * scale), Mathf.RoundToInt(10 * scale), Mathf.RoundToInt(10 * scale)),
