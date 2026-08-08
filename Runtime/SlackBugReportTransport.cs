@@ -157,8 +157,6 @@ namespace MacacaGames.RuntimeBugReporter
             builder.Append("*Description*\n").Append(SlackEscape(report.Description)).Append('\n');
             foreach (var field in report.Fields)
                 builder.Append("*").Append(SlackEscape(field.Key)).Append(":* ").Append(SlackEscape(field.Value)).Append('\n');
-            if (report.Attachments.Count > 0)
-                builder.Append("*Attachments:* ").Append(report.Attachments.Count).Append(" (uploaded by the configured Slack app)");
             return builder.ToString();
         }
 

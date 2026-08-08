@@ -607,7 +607,7 @@ namespace MacacaGames.RuntimeBugReporter
                 Title = title.Trim(),
                 Description = description.Trim()
             };
-            report.Fields["Build"] = Application.version + " (" + Application.buildGUID + ")";
+            report.Fields["Build"] = BuildVersionLabel();
             report.Fields["Scene"] = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
             report.Fields["UTC"] = report.CreatedUtc.ToString("O");
 
@@ -627,7 +627,6 @@ namespace MacacaGames.RuntimeBugReporter
                     "Gameplay around report time");
                 videoAttachment.DeleteSourceAfterStaging = true;
                 AddAttachmentIfAllowed(report, videoAttachment);
-                report.Fields["Video"] = videoCapture.EncoderName + ", " + videoCapture.DurationSeconds.ToString("0.00") + "s, " + videoCapture.FrameCount + " captured frames";
             }
             if (settings.includeDiagnostics || settings.includeRecentLogs)
             {
@@ -663,7 +662,7 @@ namespace MacacaGames.RuntimeBugReporter
                 builder.AppendLine("UTC: " + DateTime.UtcNow.ToString("O"));
                 builder.AppendLine("Product: " + Application.productName);
                 builder.AppendLine("Version: " + Application.version);
-                builder.AppendLine("Build GUID: " + Application.buildGUID);
+                builder.AppendLine("Build: " + BuildVersionLabel());
                 builder.AppendLine("Unity: " + Application.unityVersion);
                 builder.AppendLine("Platform: " + Application.platform);
                 builder.AppendLine("OS: " + SystemInfo.operatingSystem);
@@ -688,6 +687,44 @@ namespace MacacaGames.RuntimeBugReporter
         {
             return settings.categories != null && settings.categories.Length > 0 ? settings.categories : new[] { "Other" };
         }
+
+        private static string BuildVersionLabel()
+        {
+            var version = string.IsNullOrEmpty(Application.version) ? "N/A" : Application.version;
+#if UNITY_ANDROID && !UNITY_EDITOR
+            try
+            {
+                using (var unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer"))
+                using (var activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity"))
+                using (var packageManager = activity.Call<AndroidJavaObject>("getPackageManager"))
+                using (var packageInfo = packageManager.Call<AndroidJavaObject>("getPackageInfo", activity.Call<string>("getPackageName"), 0))
+                {
+                    return version + " (Code: " + packageInfo.Get<int>("versionCode") + ")";
+                }
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("[Macaca Beacon] Failed to read Android version code: " + exception.Message);
+            }
+#elif UNITY_IOS && !UNITY_EDITOR
+            try
+            {
+                var buildNumber = MacacaBeaconVideo_GetBuildNumber();
+                if (buildNumber >= 0)
+                    return version + " (Build: " + buildNumber + ")";
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("[Macaca Beacon] Failed to read iOS build number: " + exception.Message);
+            }
+#endif
+            return version;
+        }
+
+#if UNITY_IOS && !UNITY_EDITOR
+        [System.Runtime.InteropServices.DllImport("__Internal")]
+        private static extern int MacacaBeaconVideo_GetBuildNumber();
+#endif
 
         private void DrawLabel(string value) => GUILayout.Label(value, labelStyle);
 

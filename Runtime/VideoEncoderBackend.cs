@@ -89,6 +89,8 @@ namespace MacacaGames.RuntimeBugReporter
         {
 #if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
             return new WindowsMediaFoundationMp4Encoder();
+#elif UNITY_ANDROID && !UNITY_EDITOR
+            return new AndroidMediaCodecMp4Encoder();
 #else
             return new MacOsH264Mp4Encoder();
 #endif
