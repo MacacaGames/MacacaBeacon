@@ -6,9 +6,11 @@ import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
+import android.media.MediaCodecList;
 import android.media.MediaFormat;
 import android.media.MediaMuxer;
 import android.os.Build;
+import android.view.Surface;
 import android.util.Log;
 
 import java.io.IOException;
@@ -19,11 +21,28 @@ import java.util.HashMap;
 import java.util.Map;
 
 public final class MacacaBeaconVideo {
+    private static final boolean nativeVideoLoaded;
+    static {
+        boolean loaded = false;
+        try {
+            System.loadLibrary("MacacaBeaconAndroidVideo");
+            loaded = true;
+        } catch (Throwable throwable) {
+            Log.w("MacacaBeacon", "Android GPU video plugin is unavailable", throwable);
+        }
+        nativeVideoLoaded = loaded;
+    }
+
+    private static native int nativeRegisterSurface(long id, Surface surface);
+    private static native void nativeUnregisterSurface(long id);
+    private static native void nativeWaitForIdle(long id);
     private static final Map<Long, Session> sessions = new HashMap<>();
     private static final Map<Long, EncodeJob> jobs = new HashMap<>();
+    private static final Map<Long, SurfaceSession> surfaceSessions = new HashMap<>();
     private static String lastCreateFailure = "";
     private static long nextId = 1;
     private static long nextJobId = 1;
+    private static long nextSurfaceId = 1;
 
     private MacacaBeaconVideo() { }
 
@@ -85,6 +104,49 @@ public final class MacacaBeaconVideo {
 
     public static synchronized void destroy(long id) {
         Session session = sessions.remove(id);
+        if (session != null) session.close();
+    }
+
+    public static synchronized long createSurfaceSession(String path, int width, int height, int fps, int bitrate) {
+        try {
+            SurfaceSession session = new SurfaceSession(path, width, height, fps, bitrate);
+            long id = nextSurfaceId++;
+            if (!nativeVideoLoaded || nativeRegisterSurface(id, session.inputSurface) == 0) {
+                session.close();
+                throw new IOException("Android GPU video plugin could not register the MediaCodec input Surface.");
+            }
+            surfaceSessions.put(id, session);
+            return id;
+        } catch (Exception exception) {
+            lastCreateFailure = exception.getClass().getSimpleName() + ": " + exception.getMessage();
+            Log.e("MacacaBeacon", "Could not create Android Surface H.264 encoder", exception);
+            return 0;
+        }
+    }
+
+    public static synchronized Surface getSurface(long id) {
+        SurfaceSession session = surfaceSessions.get(id);
+        return session == null ? null : session.inputSurface;
+    }
+
+    public static synchronized int finishSurfaceSession(long id) {
+        SurfaceSession session = surfaceSessions.get(id);
+        if (nativeVideoLoaded) {
+            try { nativeWaitForIdle(id); } catch (Throwable ignored) { }
+        }
+        return session == null ? 0 : session.finish();
+    }
+
+    public static synchronized String surfaceSessionError(long id) {
+        SurfaceSession session = surfaceSessions.get(id);
+        return session == null ? "Android Surface encoder session was not found." : session.error;
+    }
+
+    public static synchronized void destroySurfaceSession(long id) {
+        SurfaceSession session = surfaceSessions.remove(id);
+        if (nativeVideoLoaded) {
+            try { nativeUnregisterSurface(id); } catch (Throwable ignored) { }
+        }
         if (session != null) session.close();
     }
 
@@ -219,6 +281,124 @@ public final class MacacaBeaconVideo {
                 stream.close();
             }
             return bytes;
+        }
+    }
+
+    private static final class SurfaceSession implements Runnable {
+        private final MediaCodec codec;
+        private final MediaMuxer muxer;
+        private final MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
+        private final Surface inputSurface;
+        private final int width;
+        private final int height;
+        private final int fps;
+        private int track = -1;
+        private boolean muxerStarted;
+        private boolean finished;
+        private volatile String error;
+        private Thread drainThread;
+
+        SurfaceSession(String path, int requestedWidth, int requestedHeight, int requestedFps, int bitrate) throws Exception {
+            width = align16(Math.max(2, requestedWidth));
+            height = align16(Math.max(2, requestedHeight));
+            fps = Math.max(1, requestedFps);
+            MediaCodecInfo codecInfo = findSurfaceCodec();
+            if (codecInfo == null) throw new IOException("No Android H.264 surface encoder is available.");
+
+            MediaFormat format = MediaFormat.createVideoFormat("video/avc", width, height);
+            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
+            format.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
+            format.setInteger(MediaFormat.KEY_BIT_RATE, Math.max(128000, bitrate));
+            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
+            codec = MediaCodec.createByCodecName(codecInfo.getName());
+            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+            inputSurface = codec.createInputSurface();
+            codec.start();
+            muxer = new MediaMuxer(path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+            error = null;
+            drainThread = new Thread(this, "MacacaBeaconSurfaceDrain");
+            drainThread.setPriority(Thread.NORM_PRIORITY - 1);
+            drainThread.start();
+            Log.i("MacacaBeacon", "Using Android Surface H.264 encoder " + codecInfo.getName() + " size=" + width + "x" + height);
+        }
+
+        @Override public void run() {
+            try {
+                while (!finished) drain(false);
+                drain(true);
+            } catch (Throwable throwable) {
+                error = throwable.getClass().getSimpleName() + ": " + throwable.getMessage();
+                Log.e("MacacaBeacon", "Android Surface drain failed", throwable);
+            }
+        }
+
+        int finish() {
+            if (finished) return error == null ? 1 : 0;
+            try {
+                codec.signalEndOfInputStream();
+                finished = true;
+                if (drainThread != null) drainThread.join(5000);
+                if (error == null && muxerStarted) {
+                    muxer.stop();
+                    muxerStarted = false;
+                }
+                return error == null ? 1 : 0;
+            } catch (Exception exception) {
+                error = exception.getMessage() == null ? "Android Surface finalization failed." : exception.getMessage();
+                return 0;
+            }
+        }
+
+        private void drain(boolean endOfStream) {
+            int idleCount = 0;
+            while (idleCount < (endOfStream ? 100 : 2)) {
+                int result = codec.dequeueOutputBuffer(bufferInfo, 10000);
+                if (result == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                    idleCount++;
+                } else if (result == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    if (muxerStarted) throw new IllegalStateException("Android Surface encoder changed output format twice.");
+                    track = muxer.addTrack(codec.getOutputFormat());
+                    muxer.start();
+                    muxerStarted = true;
+                } else if (result >= 0) {
+                    ByteBuffer output = codec.getOutputBuffer(result);
+                    if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 && bufferInfo.size > 0 && muxerStarted && output != null) {
+                        output.position(bufferInfo.offset);
+                        output.limit(bufferInfo.offset + bufferInfo.size);
+                        muxer.writeSampleData(track, output, bufferInfo);
+                    }
+                    boolean eos = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
+                    codec.releaseOutputBuffer(result, false);
+                    if (eos) break;
+                }
+            }
+        }
+
+        void close() {
+            try { if (!finished) finish(); } catch (Exception ignored) { }
+            try { inputSurface.release(); } catch (Exception ignored) { }
+            try { if (muxerStarted) muxer.stop(); } catch (Exception ignored) { }
+            try { muxer.release(); } catch (Exception ignored) { }
+            try { codec.stop(); } catch (Exception ignored) { }
+            try { codec.release(); } catch (Exception ignored) { }
+        }
+
+        private static MediaCodecInfo findSurfaceCodec() {
+            MediaCodecList list = new MediaCodecList(MediaCodecList.ALL_CODECS);
+            for (MediaCodecInfo info : list.getCodecInfos()) {
+                if (!info.isEncoder()) continue;
+                for (String type : info.getSupportedTypes()) {
+                    if (!"video/avc".equalsIgnoreCase(type)) continue;
+                    for (MediaCodecInfo.CodecCapabilities capabilities : new MediaCodecInfo.CodecCapabilities[] { info.getCapabilitiesForType(type) })
+                        for (int format : capabilities.colorFormats)
+                            if (format == MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) return info;
+                }
+            }
+            return null;
+        }
+
+        private static int align16(int value) {
+            return (value + 15) & ~15;
         }
     }
 

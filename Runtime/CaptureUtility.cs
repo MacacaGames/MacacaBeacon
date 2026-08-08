@@ -16,11 +16,79 @@ namespace MacacaGames.RuntimeBugReporter
         public static IEnumerator CapturePng(Action<byte[], Texture2D> completed)
         {
             yield return new WaitForEndOfFrame();
-            var texture = ScreenCapture.CaptureScreenshotAsTexture();
+
+            // Use the same backbuffer capture path as video on Android. The
+            // AsTexture path can use the logical orientation/viewport size,
+            // which produces an incorrectly framed portrait capture when the
+            // display is letterboxed or rotated.
+            if (SystemInfo.supportsAsyncGPUReadback)
+            {
+                var width = CaptureWidth();
+                var height = CaptureHeight();
+                var renderTexture = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
+                var request = default(AsyncGPUReadbackRequest);
+                Texture2D capturedTexture = null;
+                try
+                {
+                    ScreenCapture.CaptureScreenshotIntoRenderTexture(renderTexture);
+                    request = AsyncGPUReadback.Request(renderTexture, 0, TextureFormat.RGBA32);
+                    while (!request.done)
+                        yield return null;
+                    if (!request.hasError)
+                    {
+                        var raw = request.GetData<byte>();
+                        EnsureReadbackBuffers(raw.Length, width * 4);
+                        raw.CopyTo(readbackBuffer);
+                        // Android's CaptureScreenshotIntoRenderTexture readback
+                        // is bottom-up even when the graphics UV origin is top.
+                        // Keep the platform correction separate from video's
+                        // backend-specific texture orientation.
+#if UNITY_ANDROID && !UNITY_EDITOR
+                        EnsureRowSwapBuffer(width * 4);
+                        FlipRowsInPlace(readbackBuffer, rowSwapBuffer, width, height, 4);
+#elif !UNITY_ANDROID || UNITY_EDITOR
+                        if (!SystemInfo.graphicsUVStartsAtTop)
+                        {
+                            EnsureRowSwapBuffer(width * 4);
+                            FlipRowsInPlace(readbackBuffer, rowSwapBuffer, width, height, 4);
+                        }
+#endif
+                        capturedTexture = new Texture2D(width, height, TextureFormat.RGBA32, false);
+                        capturedTexture.LoadRawTextureData(readbackBuffer);
+                        capturedTexture.Apply(false, false);
+                        completed?.Invoke(capturedTexture.EncodeToPNG(), capturedTexture);
+                        yield break;
+                    }
+                }
+                finally
+                {
+                    RenderTexture.ReleaseTemporary(renderTexture);
+                }
+            }
+
+            var fallbackTexture = ScreenCapture.CaptureScreenshotAsTexture();
             byte[] bytes = null;
-            if (texture != null)
-                bytes = texture.EncodeToPNG();
-            completed?.Invoke(bytes, texture);
+            if (fallbackTexture != null)
+                bytes = fallbackTexture.EncodeToPNG();
+            completed?.Invoke(bytes, fallbackTexture);
+        }
+
+        private static int CaptureWidth()
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (Display.main != null && Display.main.renderingWidth > 0)
+                return Display.main.renderingWidth;
+#endif
+            return Mathf.Max(2, Screen.width);
+        }
+
+        private static int CaptureHeight()
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (Display.main != null && Display.main.renderingHeight > 0)
+                return Display.main.renderingHeight;
+#endif
+            return Mathf.Max(2, Screen.height);
         }
 
         public static byte[] CaptureScaledJpeg(int targetWidth, int quality)

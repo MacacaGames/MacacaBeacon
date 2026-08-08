@@ -14,6 +14,7 @@ namespace MacacaGames.RuntimeBugReporter
         // lifetime and graphics-device reset paths; the existing CPU/native
         // MP4 path is the crash-safe default.
         private const bool EnableExperimentalMacOsGpuPath = true;
+        private const bool EnableExperimentalAndroidGpuPath = true;
         private readonly MonoBehaviour host;
         private readonly BugReporterSettings settings;
         private readonly Queue<VideoCaptureFrame> history = new Queue<VideoCaptureFrame>();
@@ -31,10 +32,11 @@ namespace MacacaGames.RuntimeBugReporter
         private string frameCacheDirectory;
         private long historyBytes;
         private readonly MacOsGpuRollingVideoRecorder gpuRecorder;
+        private readonly AndroidGpuRollingVideoRecorder androidGpuRecorder;
 
-        public bool IsFinalizing => gpuRecorder != null ? gpuRecorder.IsFinalizing : isFinalizing;
-        public bool IsEncoding => gpuRecorder != null ? gpuRecorder.IsEncoding : isEncoding;
-        public bool IsEnabled => gpuRecorder != null ? gpuRecorder.IsEnabled : requestedEnabled;
+        public bool IsFinalizing => gpuRecorder != null ? gpuRecorder.IsFinalizing : androidGpuRecorder != null ? androidGpuRecorder.IsFinalizing : isFinalizing;
+        public bool IsEncoding => gpuRecorder != null ? gpuRecorder.IsEncoding : androidGpuRecorder != null ? androidGpuRecorder.IsEncoding : isEncoding;
+        public bool IsEnabled => gpuRecorder != null ? gpuRecorder.IsEnabled : androidGpuRecorder != null ? androidGpuRecorder.IsEnabled : requestedEnabled;
 
         public RollingVideoRecorder(MonoBehaviour host, BugReporterSettings settings)
         {
@@ -43,6 +45,10 @@ namespace MacacaGames.RuntimeBugReporter
 #if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
             if (EnableExperimentalMacOsGpuPath && MacOsGpuVideoBridge.IsAvailable)
                 gpuRecorder = new MacOsGpuRollingVideoRecorder(host, settings);
+#endif
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (EnableExperimentalAndroidGpuPath && AndroidGpuVideoBridge.IsAvailable)
+                androidGpuRecorder = new AndroidGpuRollingVideoRecorder(host, settings);
 #endif
         }
 
@@ -53,6 +59,11 @@ namespace MacacaGames.RuntimeBugReporter
                 gpuRecorder.Start();
                 return;
             }
+            if (androidGpuRecorder != null)
+            {
+                androidGpuRecorder.Start();
+                return;
+            }
             SetEnabled(settings.enableRollingVideo);
         }
 
@@ -61,6 +72,11 @@ namespace MacacaGames.RuntimeBugReporter
             if (gpuRecorder != null)
             {
                 gpuRecorder.SetEnabled(enabled);
+                return;
+            }
+            if (androidGpuRecorder != null)
+            {
+                androidGpuRecorder.SetEnabled(enabled);
                 return;
             }
             requestedEnabled = enabled;
@@ -83,6 +99,11 @@ namespace MacacaGames.RuntimeBugReporter
             if (gpuRecorder != null)
             {
                 gpuRecorder.MarkIncident(completed);
+                return;
+            }
+            if (androidGpuRecorder != null)
+            {
+                androidGpuRecorder.MarkIncident(completed);
                 return;
             }
             if (!requestedEnabled)

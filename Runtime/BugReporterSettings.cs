@@ -57,7 +57,7 @@ namespace MacacaGames.RuntimeBugReporter
         public bool preferMp4 = true;
         [Tooltip("Use managed MJPEG AVI when this platform has no MP4 backend or MP4 encoding fails.")]
         public bool allowLegacyAviFallback = true;
-        [Range(1, 24)] public int videoFramesPerSecond = 15;
+        [Range(1, 60)] public int videoFramesPerSecond = 30;
         [Range(1, 10)] public int secondsBefore = 15;
         [Range(0, 5)] public int secondsAfter = 1;
         [Range(320, 1920)] public int videoWidth = 960;

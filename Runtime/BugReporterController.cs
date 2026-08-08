@@ -35,6 +35,7 @@ namespace MacacaGames.RuntimeBugReporter
         private string validationMessage = "";
         private string pendingFocusControl;
         private Vector2 formScroll;
+        private Vector2 contentScroll;
         private Rect windowRect;
         private CursorLockMode previousCursorLock;
         private bool previousCursorVisible;
@@ -113,6 +114,7 @@ namespace MacacaGames.RuntimeBugReporter
         {
             if (Instance == this) Instance = null;
             logs?.Dispose();
+            videoRecorder?.Dispose();
             if (screenshotPreview != null) Destroy(screenshotPreview);
             ReleaseStyleTextures();
         }
@@ -229,8 +231,9 @@ namespace MacacaGames.RuntimeBugReporter
 
             var uiScale = GetUiScale();
             EnsureStyles(uiScale);
-            GUI.depth = -10000;
             var overlay = new Rect(0, 0, Screen.width, Screen.height);
+
+            GUI.depth = -10000;
             GUI.color = new Color(0.247f, 0.227f, 0.196f, settings.backdropOpacity);
             GUI.DrawTexture(overlay, Texture2D.whiteTexture);
             GUI.color = Color.white;
@@ -250,6 +253,28 @@ namespace MacacaGames.RuntimeBugReporter
                 height = Mathf.Min(Mathf.Clamp(Screen.height * 0.88f, 620f, 880f), Screen.height - outerMargin * 2f);
                 windowRect = new Rect((Screen.width - width) * 0.5f, (Screen.height - height) * 0.5f, width, height);
             }
+
+            // Fill only the area outside the safe-area window. Drawing four
+            // non-overlapping strips avoids a full-screen texture covering
+            // the IMGUI window on device simulators with different GUI depth
+            // ordering.
+            if (settings.fullscreen)
+            {
+                GUI.color = Color.white;
+                var safeTop = windowRect.y;
+                var safeBottom = windowRect.yMax;
+                var safeLeft = windowRect.x;
+                var safeRight = windowRect.xMax;
+                if (safeTop > 0f)
+                    GUI.DrawTexture(new Rect(0f, 0f, Screen.width, safeTop), windowTexture);
+                if (safeBottom < Screen.height)
+                    GUI.DrawTexture(new Rect(0f, safeBottom, Screen.width, Screen.height - safeBottom), windowTexture);
+                if (safeLeft > 0f)
+                    GUI.DrawTexture(new Rect(0f, safeTop, safeLeft, windowRect.height), windowTexture);
+                if (safeRight < Screen.width)
+                    GUI.DrawTexture(new Rect(safeRight, safeTop, Screen.width - safeRight, windowRect.height), windowTexture);
+            }
+            GUI.color = Color.white;
             windowRect = GUILayout.Window(GetInstanceID(), windowRect, DrawWindow, GUIContent.none, GUIStyle.none, GUILayout.Width(width), GUILayout.Height(height));
 
             if (!string.IsNullOrEmpty(pendingFocusControl) && Event.current.type == EventType.Repaint)
@@ -283,7 +308,14 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.Space(18 * styleScale);
 
             if (CanUseDesktopLayout())
+            {
+                // The left card contains a preview, annotation controls,
+                // summary, and privacy copy. Let this whole content area
+                // scroll so the footer remains fixed and always reachable.
+                contentScroll = GUILayout.BeginScrollView(contentScroll, false, true, GUILayout.ExpandHeight(true));
                 DrawDesktopContent();
+                GUILayout.EndScrollView();
+            }
             else
                 DrawCompactContent();
 
@@ -445,7 +477,7 @@ namespace MacacaGames.RuntimeBugReporter
                 GUILayout.FlexibleSpace();
                 DrawAnnotationButton("UNDO", canInteract && screenshotAnnotator.CanUndo, () => screenshotAnnotator.Undo(), 96 * styleScale);
                 DrawAnnotationButton("CLEAR", canInteract && screenshotAnnotator.HasAnnotations, () => screenshotAnnotator.Clear(), 96 * styleScale);
-                DrawAnnotationButton("RECAPTURE", canInteract, () => StartCoroutine(RecaptureScreenshot()), 112 * styleScale);
+                DrawAnnotationButton("RECAPTURE", canInteract, () => StartCoroutine(RecaptureScreenshot()), 150 * styleScale);
                 GUILayout.EndHorizontal();
             }
             GUILayout.Space(8 * styleScale);
