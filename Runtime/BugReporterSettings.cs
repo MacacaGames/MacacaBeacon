@@ -2,6 +2,14 @@ using UnityEngine;
 
 namespace MacacaGames.RuntimeBugReporter
 {
+    public enum MobileEntryCorner
+    {
+        TopLeft,
+        TopRight,
+        BottomLeft,
+        BottomRight
+    }
+
     [CreateAssetMenu(fileName = ResourceName, menuName = "Macaca Beacon/Settings")]
     public sealed class BugReporterSettings : ScriptableObject
     {
@@ -19,6 +27,16 @@ namespace MacacaGames.RuntimeBugReporter
         [Range(0.8f, 1.5f)] public float interfaceScale = 1.25f;
         [Range(0.45f, 0.9f)] public float desktopWidthRatio = 0.64f;
 
+        [Header("Mobile entry")]
+        [Tooltip("Show a small edge button on iOS and Android. It only consumes touches inside its own rectangle.")]
+        public bool mobileEntryButton = true;
+        [Tooltip("Open the reporter after holding three fingers on the screen. This gesture does not reserve a visible UI area.")]
+        public bool mobileThreeFingerGesture = true;
+        [Range(48f, 112f)] public float mobileEntrySize = 68f;
+        [Range(0.15f, 1f)] public float mobileEntryOpacity = 0.72f;
+        [Range(0.3f, 2f)] public float mobileGestureHoldSeconds = 0.75f;
+        public MobileEntryCorner mobileEntryCorner = MobileEntryCorner.TopRight;
+
         [Header("Slack")]
         [Tooltip("Slack bot token with chat:write and files:write. Used for both the report message and attachments.")]
         public string botToken = "";
@@ -33,7 +51,7 @@ namespace MacacaGames.RuntimeBugReporter
         [Min(20)] public int maximumLogEntries = 200;
 
         [Header("Rolling video (optional)")]
-        [Tooltip("Continuously keeps low-rate frames in memory. On macOS they are finalized as H.264 MP4; unsupported platforms can use the legacy AVI fallback.")]
+        [Tooltip("Continuously keeps low-rate frames in memory. On macOS and iOS they are finalized as H.264 MP4; unsupported platforms can use the legacy AVI fallback.")]
         public bool enableRollingVideo = false;
         [Tooltip("Prefer a Slack-friendly H.264 MP4 when a runtime encoder backend is available.")]
         public bool preferMp4 = true;

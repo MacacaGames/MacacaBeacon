@@ -2,13 +2,13 @@
 
 > Capture the moment. Signal the issue.
 
-遊戲內、可抽離為 UPM 的 Bug Report 工具。它使用 **IMGUI**（不依賴 UGUI），可用 F6 開啟，收集截圖、最近 log、裝置／build／場景資訊，並送到 Slack。
+遊戲內、可抽離為 UPM 的 Bug Report 工具。它使用 **IMGUI**（不依賴 UGUI），桌面可用 F6 開啟，iOS／Android 則提供安全區角落的低干擾入口與三指長按手勢；工具會收集截圖、最近 log、裝置／build／場景資訊，並送到 Slack。
 
 截圖預覽提供單層內建標注畫筆，圖片顯示後即可直接繪製，不需要進入另一個模式。工具列固定提供紅／黃／青三色、三種筆刷粗細、Undo、可復原的 Clear，以及重新截圖。完成的筆跡會合成進 Slack 與本地失敗備援所使用的 PNG。
 
 ## 專案內啟用
 
-這個 repository 已將套件放在 `Packages/com.macacagames.beacon`，Unity 會把它視為 embedded package。進入 Play Mode 後直接按 **F6** 即可開啟；不需要在 Scene 放 prefab。
+這個 repository 已將套件放在 `Packages/com.macacagames.beacon`，Unity 會把它視為 embedded package。桌面進入 Play Mode 後直接按 **F6** 即可開啟；不需要在 Scene 放 prefab。手機平台預設顯示一個只佔自身矩形的小型 `!` 入口，也可以用三指按住約 0.75 秒開啟。
 
 第一次設定請開啟：
 
@@ -17,6 +17,8 @@
 設定資產會建立於 `Assets/Resources/BugReporterSettings.asset`。
 
 `Appearance` 預設使用全螢幕並將介面縮放設為 1.25，寬螢幕採左右雙欄，小尺寸 Game View 自動切換成可捲動單欄。關閉 `Fullscreen` 後會改用置中視窗，並可調整背景遮罩透明度與桌面視窗寬度比例。
+
+手機入口設定位於 `Mobile entry`：可分別關閉角落按鈕或三指手勢，調整按鈕尺寸／透明度／位置。按鈕會依 `Screen.safeArea` 避開瀏海與 Home indicator，只有觸控落在按鈕自己的矩形內時才會攔截事件，不會替整個遊戲畫面鎖定觸控。
 
 ## Slack 設定
 
@@ -31,11 +33,11 @@
 ## 會送出的資料
 
 - 使用者輸入：分類、標題、描述、選填聯絡資訊
-- PNG 截圖（按 F6 後、面板出現前擷取）
+- PNG 截圖（按 F6、手機入口或三指手勢後、面板出現前擷取）
 - 截圖上的選填畫筆標注
 - Product、version、build GUID、Unity、platform、OS、CPU、RAM、GPU、VRAM、resolution、scene
 - 有固定容量上限的 recent log ring buffer；Error／Exception 包含 stack trace
-- 選填影片：macOS／Windows 優先 H.264 MP4，預設 6 FPS、前 8 秒＋後 1 秒、無音訊
+- 選填影片：macOS／Windows／iOS 優先 H.264 MP4，預設 6 FPS、前 8 秒＋後 1 秒、無音訊
 
 表單內會顯示資料用途聲明；內容可由 Settings 自訂。請依發行地區及資料內容完成實際隱私／同意流程。
 
@@ -55,12 +57,15 @@ macOS Editor／Standalone Player 使用套件內的 Universal Binary（Apple Sil
 | macOS Standalone (Intel / Apple Silicon) | H.264 MP4；可選 AVI fallback |
 | Windows Editor (x64) | H.264 MP4；可選 AVI fallback |
 | Windows Standalone (x64) | H.264 MP4；可選 AVI fallback |
-| Linux / Android / iOS | 目前使用 AVI fallback；介面已保留平台 encoder 擴充點 |
+| iOS device／Simulator | H.264 MP4；可選 AVI fallback |
+| Linux / Android | 目前使用 AVI fallback；介面已保留平台 encoder 擴充點 |
 | WebGL | 建議停用 rolling video |
 
 macOS native source 位於 `Native~/macOS`，執行 `build.sh` 可重建 `Runtime/Plugins/macOS/MacacaBeaconVideo.bundle`。它只連結 Apple 系統 framework，沒有額外第三方 runtime dependency。
 
 Windows native source 位於 `Native~/Windows`。在裝有 Visual Studio 2022「Desktop development with C++」與 Windows 10/11 SDK 的 Windows 主機執行 `build.ps1`，即可重建 `Runtime/Plugins/Windows/x86_64/MacacaBeaconVideoWindows.dll`；macOS package 維護者也可安裝 MinGW-w64 後執行 `build-cross.sh`。正式支援 Windows 10/11 x64；32-bit Windows、UWP 與 ARM64 目前不在 PluginImporter 支援範圍。
+
+iOS 使用 `Runtime/Plugins/iOS/MacacaBeaconVideo.mm`，由 Unity 產生 Xcode project 時直接編入，透過 `DllImport("__Internal")` 呼叫 AVAssetWriter。它使用 iOS 硬體 H.264 路徑，並由 PluginImporter 自動加入 AVFoundation、CoreGraphics、CoreMedia、CoreVideo、ImageIO 與 VideoToolbox；不需要在 Scene 放置額外元件。
 
 其他平台可以實作 `IVideoEncoderBackend`，並在遊戲初始化時呼叫 `BugReporter.SetVideoEncoder(backend)`。Backend 會收到含 JPEG bytes 與 realtime timestamp 的唯讀 frame list，負責將結果寫到指定路徑；成功後套件會自動接手本地 staging、Slack 上傳與清理。
 
@@ -147,7 +152,7 @@ git commit -m "Update Macaca Beacon"
 "com.macacagames.beacon": "https://github.com/your-org/macaca-beacon.git?path=/com.macacagames.beacon#v0.1.0"
 ```
 
-套件 managed runtime assembly 沒有第三方相依；需要 Unity 的 IMGUI、UnityWebRequest、ScreenCapture 與 ImageConversion built-in modules。macOS MP4 backend 使用系統內建的 AVFoundation、VideoToolbox、CoreMedia、CoreVideo、CoreGraphics 與 ImageIO frameworks；Windows MP4 backend 使用系統內建的 Media Foundation、Windows Imaging Component 與 COM。
+套件 managed runtime assembly 沒有第三方相依；需要 Unity 的 IMGUI、UnityWebRequest、ScreenCapture 與 ImageConversion built-in modules。macOS／iOS MP4 backend 使用系統內建的 AVFoundation、VideoToolbox、CoreMedia、CoreVideo、CoreGraphics 與 ImageIO frameworks；Windows MP4 backend 使用系統內建的 Media Foundation、Windows Imaging Component 與 COM。
 
 ## 參考
 

@@ -1,8 +1,8 @@
 {
   "name": "com.macacagames.beacon",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "displayName": "Macaca Beacon",
-  "description": "Macaca Games' modular in-game issue beacon with an IMGUI form, screenshots, rolling H.264 MP4 video on macOS and Windows, diagnostics, and Slack delivery.",
+  "description": "Macaca Games' modular in-game issue beacon with an IMGUI form, mobile entry points, screenshots, rolling H.264 MP4 video on macOS, Windows, and iOS, diagnostics, and Slack delivery.",
   "unity": "2021.3",
   "keywords": [
     "bug",

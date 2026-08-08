@@ -55,6 +55,9 @@ namespace MacacaGames.RuntimeBugReporter
         private Texture2D accentTexture;
         private Texture2D fieldTexture;
         private float styleScale = -1f;
+        private GUIStyle mobileEntryStyle;
+        private float mobileGestureStartedAt = -1f;
+        private bool mobileGestureTriggered;
 
         internal void Initialize(BugReporterSettings value)
         {
@@ -99,6 +102,33 @@ namespace MacacaGames.RuntimeBugReporter
             logs?.Dispose();
             if (screenshotPreview != null) Destroy(screenshotPreview);
             ReleaseStyleTextures();
+        }
+
+        private void Update()
+        {
+#if UNITY_IOS || UNITY_ANDROID
+            if (settings == null || IsOpen || isOpening || !settings.mobileThreeFingerGesture)
+            {
+                mobileGestureStartedAt = -1f;
+                mobileGestureTriggered = false;
+                return;
+            }
+
+            if (Input.touchCount < 3)
+            {
+                mobileGestureStartedAt = -1f;
+                mobileGestureTriggered = false;
+                return;
+            }
+
+            if (mobileGestureStartedAt < 0f)
+                mobileGestureStartedAt = Time.unscaledTime;
+            if (!mobileGestureTriggered && Time.unscaledTime - mobileGestureStartedAt >= settings.mobileGestureHoldSeconds)
+            {
+                mobileGestureTriggered = true;
+                RequestOpen();
+            }
+#endif
         }
 
         private IEnumerator OpenAfterCapture()
@@ -160,6 +190,10 @@ namespace MacacaGames.RuntimeBugReporter
                 if (IsOpen) Close(); else RequestOpen();
                 current.Use();
             }
+#if UNITY_IOS || UNITY_ANDROID
+            if (!IsOpen && !isOpening && settings.mobileEntryButton)
+                DrawMobileEntry();
+#endif
             if (!IsOpen)
                 return;
             if (settings.allowEscapeToClose && current.type == EventType.KeyDown && current.keyCode == KeyCode.Escape)
@@ -742,7 +776,37 @@ namespace MacacaGames.RuntimeBugReporter
             statusStyle.normal.textColor = new Color(0.09f, 0.48f, 0.50f);
             validationStyle = new GUIStyle(hintStyle) { fontStyle = FontStyle.Bold };
             validationStyle.normal.textColor = new Color(0.70f, 0.23f, 0.20f);
+
+            mobileEntryStyle = CreateButtonStyle(scale, accent, accentHover, accentActive, new Color(0.17f, 0.15f, 0.13f));
+            mobileEntryStyle.fontSize = Mathf.RoundToInt(24 * scale);
+            mobileEntryStyle.margin = new RectOffset(0, 0, 0, 0);
+            mobileEntryStyle.padding = new RectOffset(0, 0, 0, 0);
         }
+
+#if UNITY_IOS || UNITY_ANDROID
+        private void DrawMobileEntry()
+        {
+            EnsureStyles(Mathf.Clamp(Screen.height / 900f, 0.9f, 1.25f) * settings.interfaceScale);
+            var safeArea = Screen.safeArea;
+            var size = Mathf.Clamp(settings.mobileEntrySize * styleScale, 48f, 112f);
+            var margin = Mathf.Max(10f, 14f * styleScale);
+            var x = settings.mobileEntryCorner == MobileEntryCorner.TopLeft || settings.mobileEntryCorner == MobileEntryCorner.BottomLeft
+                ? safeArea.xMin + margin
+                : safeArea.xMax - size - margin;
+            var y = settings.mobileEntryCorner == MobileEntryCorner.TopLeft || settings.mobileEntryCorner == MobileEntryCorner.TopRight
+                ? safeArea.yMin + margin
+                : safeArea.yMax - size - margin;
+            var rect = new Rect(x, y, size, size);
+
+            GUI.color = new Color(1f, 1f, 1f, settings.mobileEntryOpacity);
+            if (GUI.Button(rect, "!", mobileEntryStyle))
+            {
+                RequestOpen();
+                Event.current.Use();
+            }
+            GUI.color = Color.white;
+        }
+#endif
 
         private GUIStyle CreateButtonStyle(float scale, Texture2D normal, Texture2D hover, Texture2D active, Color text)
         {

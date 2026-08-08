@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.0] - 2026-08-08
+
+- Added an iOS AVAssetWriter H.264 MP4 backend compiled directly into Unity's generated Xcode project through `__Internal`.
+- Added iOS framework dependencies and hardware H.264 settings for device builds.
+- Added low-interference mobile entry points: a safe-area corner button and configurable three-finger hold gesture.
+
 ## [0.3.0] - 2026-08-07
 
 - Added a Windows x64 Media Foundation backend that encodes rolling JPEG frames as H.264 MP4 in the Windows Editor and Standalone Player.

@@ -14,7 +14,7 @@ namespace MacacaGames.RuntimeBugReporter
         {
             get
             {
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
                 try
                 {
                     return NativeIsAvailable() != 0;
@@ -30,7 +30,7 @@ namespace MacacaGames.RuntimeBugReporter
         public bool TryEncode(string outputPath, IReadOnlyList<VideoCaptureFrame> frames, int width, int height, int framesPerSecond, int bitrateKbps, double durationSeconds, out string error)
         {
             error = null;
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
             IntPtr session = IntPtr.Zero;
             try
             {
@@ -78,7 +78,7 @@ namespace MacacaGames.RuntimeBugReporter
             }
             catch (Exception exception)
             {
-                error = "macOS MP4 encoder failed: " + exception.Message;
+                error = "Apple MP4 encoder failed: " + exception.Message;
                 return false;
             }
             finally
@@ -87,34 +87,58 @@ namespace MacacaGames.RuntimeBugReporter
                     NativeDestroy(session);
             }
 #else
-            error = "The Apple H.264 backend is only available in the macOS Editor and macOS Player.";
+            error = "The Apple H.264 backend is only available in macOS and iOS builds.";
             return false;
 #endif
         }
 
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
         private static string LastError(IntPtr session, string fallback)
         {
             var pointer = NativeLastError(session);
             return pointer == IntPtr.Zero ? fallback : Marshal.PtrToStringAnsi(pointer) ?? fallback;
         }
 
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_IsAvailable")]
+#else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_IsAvailable")]
+#endif
         private static extern int NativeIsAvailable();
 
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_Create")]
+#else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_Create")]
+#endif
         private static extern IntPtr NativeCreate([MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath, int width, int height, int framesPerSecond, int bitrate);
 
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_AddJpeg")]
+#else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_AddJpeg")]
+#endif
         private static extern int NativeAddJpeg(IntPtr session, byte[] jpegBytes, int byteCount, double presentationSeconds);
 
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_Finish")]
+#else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_Finish")]
+#endif
         private static extern int NativeFinish(IntPtr session);
 
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_LastError")]
+#else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_LastError")]
+#endif
         private static extern IntPtr NativeLastError(IntPtr session);
 
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_Destroy")]
+#else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_Destroy")]
+#endif
         private static extern void NativeDestroy(IntPtr session);
 #endif
     }
