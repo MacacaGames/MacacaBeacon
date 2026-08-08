@@ -29,7 +29,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         [Header("Mobile entry")]
         [Tooltip("Show a small edge button on iOS and Android. It only consumes touches inside its own rectangle.")]
-        public bool mobileEntryButton = true;
+        public bool mobileEntryButton = false;
         [Tooltip("Open the reporter after holding three fingers on the screen. This gesture does not reserve a visible UI area.")]
         public bool mobileThreeFingerGesture = true;
         [Range(48f, 112f)] public float mobileEntrySize = 68f;
