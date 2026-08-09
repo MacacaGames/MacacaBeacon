@@ -107,49 +107,49 @@ namespace MacacaGames.RuntimeBugReporter
             return pointer == IntPtr.Zero ? fallback : Marshal.PtrToStringAnsi(pointer) ?? fallback;
         }
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_IsAvailable")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_IsAvailable")]
 #endif
         private static extern int NativeIsAvailable();
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_Create")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_Create")]
 #endif
         private static extern IntPtr NativeCreate([MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath, int width, int height, int framesPerSecond, int bitrate);
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_AddJpeg")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_AddJpeg")]
 #endif
         private static extern int NativeAddJpeg(IntPtr session, byte[] jpegBytes, int byteCount, double presentationSeconds);
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_AddRgba")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_AddRgba")]
 #endif
         private static extern int NativeAddRgba(IntPtr session, byte[] rgbaBytes, int byteCount, int width, int height, double presentationSeconds);
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_Finish")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_Finish")]
 #endif
         private static extern int NativeFinish(IntPtr session);
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_LastError")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_LastError")]
 #endif
         private static extern IntPtr NativeLastError(IntPtr session);
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_Destroy")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_Destroy")]

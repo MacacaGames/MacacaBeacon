@@ -194,84 +194,84 @@ namespace MacacaGames.RuntimeBugReporter
 #endif
 
 #if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_Create")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_Create")]
 #endif
         private static extern IntPtr NativeCreate([MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath, int width, int height, int framesPerSecond, int bitrate);
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_GpuCreate")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_GpuCreate")]
 #endif
         private static extern IntPtr NativeGpuCreate([MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath, int width, int height, int framesPerSecond, int bitrate);
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_Finish")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_Finish")]
 #endif
         private static extern int NativeFinish(IntPtr session);
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_BeginFinish")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_BeginFinish")]
 #endif
         private static extern int NativeBeginFinish(IntPtr session);
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_IsFinishDone")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_IsFinishDone")]
 #endif
         private static extern int NativeIsFinishDone(IntPtr session);
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_FinishSucceeded")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_FinishSucceeded")]
 #endif
         private static extern int NativeFinishSucceeded(IntPtr session);
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_LastError")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_LastError")]
 #endif
         private static extern IntPtr NativeLastError(IntPtr session);
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_Destroy")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_Destroy")]
 #endif
         private static extern void NativeDestroy(IntPtr session);
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_GpuIsAvailable")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_GpuIsAvailable")]
 #endif
         private static extern int NativeIsAvailable();
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_GpuGetRenderEventFunc")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_GpuGetRenderEventFunc")]
 #endif
         private static extern IntPtr NativeGetRenderEventFunc();
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_GpuAllocateSubmitData")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_GpuAllocateSubmitData")]
 #endif
         private static extern IntPtr NativeAllocateSubmitData(IntPtr session, IntPtr nativeTexture, double presentationSeconds);
 
-#if UNITY_IOS
+#if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_ConcatSegments")]
 #else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_ConcatSegments")]
