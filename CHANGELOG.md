@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1
+
+- Added compile-time Production isolation with the `MACACA_BEACON_PRODUCTION` define.
+- Production builds retain a disabled `BugReporterSettings` shell without compiling project-specific configuration fields.
+- Disabled automatic startup, manual opening, and rolling-video toggling in Production builds.
+
 ## 0.5.0
 
 - Replaced the normal rolling JPEG capture path with asynchronous RGBA GPU readback cached to temporary files.
