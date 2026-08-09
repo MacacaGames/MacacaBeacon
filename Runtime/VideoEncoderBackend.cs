@@ -55,7 +55,11 @@ namespace MacacaGames.RuntimeBugReporter
                 }
                 else
                 {
-                    error = "No H.264 MP4 encoder backend is available on this platform.";
+                    var windows = mp4 as WindowsMediaFoundationMp4Encoder;
+                    var availabilityError = windows?.AvailabilityError;
+                    error = string.IsNullOrEmpty(availabilityError)
+                        ? "No H.264 MP4 encoder backend is available on this platform."
+                        : "Windows H.264 MP4 encoder is unavailable: " + availabilityError;
                 }
             }
 

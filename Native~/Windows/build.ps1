@@ -25,8 +25,9 @@ New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $CompilerFlags = if ($Configuration -eq "Debug") { "/Od /Zi /MTd" } else { "/O2 /GL /MT /DNDEBUG" }
 $SourcePath = Join-Path $SourceDirectory "MacacaBeaconVideoWindows.cpp"
 $ObjectPath = Join-Path $env:TEMP "MacacaBeaconVideoWindows.obj"
+$ImportLibraryPath = Join-Path $env:TEMP "MacacaBeaconVideoWindows.lib"
 $PdbPath = Join-Path $OutputDirectory "MacacaBeaconVideoWindows.pdb"
-$Command = 'call "{0}" -no_logo -arch=x64 -host_arch=x64 && cl.exe /nologo /std:c++17 /EHsc /W4 {1} /DUNICODE /D_UNICODE /c "{2}" /Fo"{3}" && link.exe /nologo /DLL /MACHINE:X64 /LTCG /OUT:"{4}" /PDB:"{5}" "{3}" mfplat.lib mfreadwrite.lib mfuuid.lib windowscodecs.lib shlwapi.lib ole32.lib' -f $DeveloperCommand, $CompilerFlags, $SourcePath, $ObjectPath, $OutputPath, $PdbPath
+$Command = 'call "{0}" -no_logo -arch=x64 -host_arch=x64 && cl.exe /nologo /std:c++17 /EHsc /W4 {1} /DUNICODE /D_UNICODE /c "{2}" /Fo"{3}" && link.exe /nologo /DLL /MACHINE:X64 /LTCG /OUT:"{4}" /IMPLIB:"{5}" /PDB:"{6}" "{3}" mfplat.lib mfreadwrite.lib mfuuid.lib windowscodecs.lib shlwapi.lib ole32.lib' -f $DeveloperCommand, $CompilerFlags, $SourcePath, $ObjectPath, $OutputPath, $ImportLibraryPath, $PdbPath
 
 & $env:ComSpec /d /s /c $Command
 if ($LASTEXITCODE -ne 0) {

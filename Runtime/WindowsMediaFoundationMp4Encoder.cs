@@ -10,6 +10,25 @@ namespace MacacaGames.RuntimeBugReporter
         public string Extension => ".mp4";
         public string MimeType => "video/mp4";
 
+        public string AvailabilityError
+        {
+            get
+            {
+#if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
+                try
+                {
+                    var pointer = NativeAvailabilityError();
+                    return pointer == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(pointer);
+                }
+                catch (DllNotFoundException exception) { return exception.Message; }
+                catch (EntryPointNotFoundException exception) { return exception.Message; }
+                catch (BadImageFormatException exception) { return exception.Message; }
+#else
+                return "The Windows Media Foundation backend is not compiled for this target.";
+#endif
+            }
+        }
+
         public bool IsAvailable
         {
             get
@@ -118,6 +137,9 @@ namespace MacacaGames.RuntimeBugReporter
 
         [DllImport("MacacaBeaconVideoWindows", EntryPoint = "MacacaBeaconWindowsVideo_IsAvailable", CallingConvention = CallingConvention.Cdecl)]
         private static extern int NativeIsAvailable();
+
+        [DllImport("MacacaBeaconVideoWindows", EntryPoint = "MacacaBeaconWindowsVideo_AvailabilityError", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr NativeAvailabilityError();
 
         [DllImport("MacacaBeaconVideoWindows", EntryPoint = "MacacaBeaconWindowsVideo_Create", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr NativeCreate([MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath, int width, int height, int framesPerSecond, int bitrate);

@@ -15,6 +15,7 @@ namespace MacacaGames.RuntimeBugReporter
         // MP4 path is the crash-safe default.
         private const bool EnableExperimentalMacOsGpuPath = true;
         private const bool EnableExperimentalAndroidGpuPath = true;
+        private const bool EnableExperimentalWindowsGpuPath = true;
         private readonly MonoBehaviour host;
         private readonly BugReporterSettings settings;
         private readonly Queue<VideoCaptureFrame> history = new Queue<VideoCaptureFrame>();
@@ -33,10 +34,11 @@ namespace MacacaGames.RuntimeBugReporter
         private long historyBytes;
         private readonly MacOsGpuRollingVideoRecorder gpuRecorder;
         private readonly AndroidGpuRollingVideoRecorder androidGpuRecorder;
+        private readonly WindowsGpuRollingVideoRecorder windowsGpuRecorder;
 
-        public bool IsFinalizing => gpuRecorder != null ? gpuRecorder.IsFinalizing : androidGpuRecorder != null ? androidGpuRecorder.IsFinalizing : isFinalizing;
-        public bool IsEncoding => gpuRecorder != null ? gpuRecorder.IsEncoding : androidGpuRecorder != null ? androidGpuRecorder.IsEncoding : isEncoding;
-        public bool IsEnabled => gpuRecorder != null ? gpuRecorder.IsEnabled : androidGpuRecorder != null ? androidGpuRecorder.IsEnabled : requestedEnabled;
+        public bool IsFinalizing => gpuRecorder != null ? gpuRecorder.IsFinalizing : androidGpuRecorder != null ? androidGpuRecorder.IsFinalizing : windowsGpuRecorder != null ? windowsGpuRecorder.IsFinalizing : isFinalizing;
+        public bool IsEncoding => gpuRecorder != null ? gpuRecorder.IsEncoding : androidGpuRecorder != null ? androidGpuRecorder.IsEncoding : windowsGpuRecorder != null ? windowsGpuRecorder.IsEncoding : isEncoding;
+        public bool IsEnabled => gpuRecorder != null ? gpuRecorder.IsEnabled : androidGpuRecorder != null ? androidGpuRecorder.IsEnabled : windowsGpuRecorder != null ? windowsGpuRecorder.IsEnabled : requestedEnabled;
 
         public RollingVideoRecorder(MonoBehaviour host, BugReporterSettings settings)
         {
@@ -49,6 +51,10 @@ namespace MacacaGames.RuntimeBugReporter
 #if UNITY_ANDROID && !UNITY_EDITOR
             if (EnableExperimentalAndroidGpuPath && AndroidGpuVideoBridge.IsAvailable)
                 androidGpuRecorder = new AndroidGpuRollingVideoRecorder(host, settings);
+#endif
+#if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
+            if (EnableExperimentalWindowsGpuPath && WindowsGpuVideoBridge.IsAvailable)
+                windowsGpuRecorder = new WindowsGpuRollingVideoRecorder(host, settings);
 #endif
         }
 
@@ -64,6 +70,11 @@ namespace MacacaGames.RuntimeBugReporter
                 androidGpuRecorder.Start();
                 return;
             }
+            if (windowsGpuRecorder != null)
+            {
+                windowsGpuRecorder.Start();
+                return;
+            }
             SetEnabled(settings.enableRollingVideo);
         }
 
@@ -77,6 +88,11 @@ namespace MacacaGames.RuntimeBugReporter
             if (androidGpuRecorder != null)
             {
                 androidGpuRecorder.SetEnabled(enabled);
+                return;
+            }
+            if (windowsGpuRecorder != null)
+            {
+                windowsGpuRecorder.SetEnabled(enabled);
                 return;
             }
             requestedEnabled = enabled;
@@ -104,6 +120,11 @@ namespace MacacaGames.RuntimeBugReporter
             if (androidGpuRecorder != null)
             {
                 androidGpuRecorder.MarkIncident(completed);
+                return;
+            }
+            if (windowsGpuRecorder != null)
+            {
+                windowsGpuRecorder.MarkIncident(completed);
                 return;
             }
             if (!requestedEnabled)
@@ -444,7 +465,9 @@ namespace MacacaGames.RuntimeBugReporter
         public void Dispose()
         {
             gpuRecorder?.Dispose();
-            if (gpuRecorder == null)
+            androidGpuRecorder?.Dispose();
+            windowsGpuRecorder?.Dispose();
+            if (gpuRecorder == null && androidGpuRecorder == null && windowsGpuRecorder == null)
                 StopCapture();
         }
 
