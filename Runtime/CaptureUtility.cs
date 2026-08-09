@@ -49,7 +49,6 @@ namespace MacacaGames.RuntimeBugReporter
                         var raw = request.GetData<byte>();
                         EnsureReadbackBuffers(raw.Length, width * 4);
                         raw.CopyTo(readbackBuffer);
-#if !UNITY_ANDROID || UNITY_EDITOR
                         // iOS Metal's screenshot readback is bottom-left based even
                         // when graphicsUVStartsAtTop reports the render target origin.
                         // Keep the final PNG in the same top-left orientation as the
@@ -59,12 +58,17 @@ namespace MacacaGames.RuntimeBugReporter
 #else
                         const bool flipScreenshotRows = false;
 #endif
-                        if (flipScreenshotRows || !SystemInfo.graphicsUVStartsAtTop)
+                        var vulkanScreenshotNeedsFlip =
+                            Application.platform == RuntimePlatform.Android &&
+                            SystemInfo.graphicsDeviceType == GraphicsDeviceType.Vulkan;
+                        var nonAndroidOriginNeedsFlip =
+                            Application.platform != RuntimePlatform.Android &&
+                            !SystemInfo.graphicsUVStartsAtTop;
+                        if (flipScreenshotRows || vulkanScreenshotNeedsFlip || nonAndroidOriginNeedsFlip)
                         {
                             EnsureRowSwapBuffer(width * 4);
                             FlipRowsInPlace(readbackBuffer, rowSwapBuffer, width, height, 4);
                         }
-#endif
                         capturedTexture = new Texture2D(width, height, TextureFormat.RGBA32, false);
                         capturedTexture.LoadRawTextureData(readbackBuffer);
                         capturedTexture.Apply(false, false);
