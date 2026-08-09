@@ -54,7 +54,7 @@ namespace MacacaGames.RuntimeBugReporter
                         // when graphicsUVStartsAtTop reports the render target origin.
                         // Keep the final PNG in the same top-left orientation as the
                         // Game View and the annotation UI.
-#if UNITY_IOS && !UNITY_EDITOR
+#if UNITY_EDITOR_OSX || (UNITY_IOS && !UNITY_EDITOR)
                         const bool flipScreenshotRows = true;
 #else
                         const bool flipScreenshotRows = false;
@@ -251,7 +251,7 @@ namespace MacacaGames.RuntimeBugReporter
                     // Use the active graphics backend instead of hard-coding
                     // platform names. Metal, Vulkan, GLES and D3D can expose
                     // different texture origins between Editor and Player.
-#if UNITY_IOS && !UNITY_EDITOR
+#if UNITY_EDITOR_OSX || (UNITY_IOS && !UNITY_EDITOR)
                     const bool flipVideoRows = true;
 #else
                     const bool flipVideoRows = false;
