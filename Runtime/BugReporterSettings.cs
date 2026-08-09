@@ -15,6 +15,47 @@ namespace MacacaGames.RuntimeBugReporter
     {
         public const string ResourceName = "BugReporterSettings";
 
+#if MACACA_BEACON_PRODUCTION
+        // Keep the asset type and runtime API available in Production, but do
+        // not compile or serialize any project-specific Beacon configuration.
+        // These properties are intentionally non-serialized shell values.
+        public bool enabledInBuild => false;
+        public KeyCode shortcut => KeyCode.None;
+        public bool allowEscapeToClose => false;
+        public bool fullscreen => false;
+        public float backdropOpacity => 0f;
+        public float interfaceScale => 1f;
+        public float desktopWidthRatio => 0.64f;
+        public bool mobileEntryButton => false;
+        public bool mobileThreeFingerGesture => false;
+        public float mobileEntrySize => 68f;
+        public float mobileEntryOpacity => 0f;
+        public float mobileGestureHoldSeconds => 0f;
+        public MobileEntryCorner mobileEntryCorner => MobileEntryCorner.TopRight;
+        public string botToken => string.Empty;
+        public string channelId => string.Empty;
+        public bool includeScreenshot => false;
+        public bool includeDiagnostics => false;
+        public bool includeRecentLogs => false;
+        public int screenshotJpegQuality => 85;
+        public int maximumLogEntries => 0;
+        public bool enableRollingVideo => false;
+        public bool preferMp4 => false;
+        public bool allowLegacyAviFallback => false;
+        public int videoFramesPerSecond => 1;
+        public int secondsBefore => 0;
+        public int secondsAfter => 0;
+        public int videoWidth => 320;
+        public int videoJpegQuality => 65;
+        public int videoBitrateKbps => 128;
+        public int maximumVideoCacheMegabytes => 0;
+        public int maximumAttachmentMegabytes => 1;
+        public bool saveFailedReportsLocally => false;
+        public int maximumRetainedLocalReports => 0;
+        public string reportTitle => string.Empty;
+        public string privacyNotice => string.Empty;
+        public string[] categories => new[] { "Other" };
+#else
         [Header("Activation")]
         public bool enabledInBuild = true;
         public KeyCode shortcut = KeyCode.F6;
@@ -76,9 +117,13 @@ namespace MacacaGames.RuntimeBugReporter
         public string reportTitle = "MACACA BEACON";
         public string privacyNotice = "This report sends your description, screenshot, recent logs, and device diagnostics to the development team for debugging only. A local copy is retained if upload fails.";
         public string[] categories = { "Gameplay", "UI", "Visual", "Audio", "Performance", "Other" };
+#endif
 
         public static BugReporterSettings LoadOrDefault()
         {
+#if MACACA_BEACON_PRODUCTION
+            return null;
+#else
             var configured = Resources.Load<BugReporterSettings>(ResourceName);
             if (configured != null)
                 return configured;
@@ -86,6 +131,7 @@ namespace MacacaGames.RuntimeBugReporter
             var defaults = CreateInstance<BugReporterSettings>();
             defaults.hideFlags = HideFlags.HideAndDontSave;
             return defaults;
+#endif
         }
     }
 }

@@ -19,16 +19,24 @@ namespace MacacaGames.RuntimeBugReporter
         {
             get
             {
+#if MACACA_BEACON_PRODUCTION
+                return false;
+#else
                 if (BugReporterController.Instance != null)
                     return BugReporterController.Instance.IsVideoRecordingEnabled;
                 return BugReporterSettings.LoadOrDefault().enableRollingVideo;
+#endif
             }
         }
 
         public static void Open()
         {
+#if MACACA_BEACON_PRODUCTION
+            return;
+#else
             EnsureController();
             BugReporterController.Instance.RequestOpen();
+#endif
         }
 
         public static void Close()
@@ -43,8 +51,12 @@ namespace MacacaGames.RuntimeBugReporter
         /// </summary>
         public static void SetVideoRecordingEnabled(bool enabled)
         {
+#if MACACA_BEACON_PRODUCTION
+            return;
+#else
             EnsureController();
             BugReporterController.Instance.SetVideoRecordingEnabled(enabled);
+#endif
         }
 
         public static void RegisterDataProvider(IBugReportDataProvider provider)
@@ -75,9 +87,13 @@ namespace MacacaGames.RuntimeBugReporter
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void AutoBootstrap()
         {
+#if MACACA_BEACON_PRODUCTION
+            return;
+#else
             var settings = BugReporterSettings.LoadOrDefault();
             if (settings.enabledInBuild)
                 EnsureController(settings);
+#endif
         }
 
         private static void EnsureController(BugReporterSettings settings = null)

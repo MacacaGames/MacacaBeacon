@@ -18,6 +18,14 @@
 
 設定資產會建立於 `Assets/Resources/BugReporterSettings.asset`。
 
+## Production 隔離
+
+若要在 Production build 中停用 Beacon，於該 build target 的 `Project Settings > Player > Scripting Define Symbols` 加入：
+
+`MACACA_BEACON_PRODUCTION`
+
+這會在編譯期將設定欄位替換為停用的 shell，並停用自動啟動、`BugReporter.Open()` 與影片錄製切換；不需要額外 CI 設定。未加入此 define 時，Editor、Development 與一般測試 build 維持完整 Beacon 行為。
+
 `Appearance` 預設使用全螢幕並將介面縮放設為 1.25，寬螢幕採左右雙欄，小尺寸 Game View 自動切換成可捲動單欄。關閉 `Fullscreen` 後會改用置中視窗，並可調整背景遮罩透明度與桌面視窗寬度比例。
 
 手機入口設定位於 `Mobile entry`：可分別關閉角落按鈕或三指手勢，調整按鈕尺寸／透明度／位置。按鈕會依 `Screen.safeArea` 避開瀏海與 Home indicator，只有觸控落在按鈕自己的矩形內時才會攔截事件，不會替整個遊戲畫面鎖定觸控。
