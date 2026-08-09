@@ -30,6 +30,17 @@ namespace MacacaGames.RuntimeBugReporter
             CapturedAt = capturedAt;
         }
 
+        public VideoCaptureFrame(byte[] data, VideoCaptureFrameFormat format, int width, int height, double capturedAt)
+        {
+            JpegData = data;
+            DataFilePath = null;
+            Format = format;
+            Width = width;
+            Height = height;
+            ByteCount = data == null ? 0 : data.Length;
+            CapturedAt = capturedAt;
+        }
+
         public VideoCaptureFrame(string dataFilePath, VideoCaptureFrameFormat format, int width, int height, int byteCount, double capturedAt)
         {
             JpegData = null;

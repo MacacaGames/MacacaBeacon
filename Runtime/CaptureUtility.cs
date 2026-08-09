@@ -17,6 +17,16 @@ namespace MacacaGames.RuntimeBugReporter
         {
             yield return new WaitForEndOfFrame();
 
+#if UNITY_WEBGL && !UNITY_EDITOR
+            // WebGL AsyncGPUReadback can fence a READ buffer while the next
+            // frame reuses it. Use the stable CPU path for Beacon captures;
+            // WebCodecs still handles the final video compression.
+            var webglTexture = ScreenCapture.CaptureScreenshotAsTexture();
+            var webglBytes = webglTexture == null ? null : webglTexture.EncodeToPNG();
+            completed?.Invoke(webglBytes, webglTexture);
+            yield break;
+#endif
+
             // Use the same backbuffer capture path as video on Android. The
             // AsTexture path can use the logical orientation/viewport size,
             // which produces an incorrectly framed portrait capture when the
@@ -121,6 +131,11 @@ namespace MacacaGames.RuntimeBugReporter
         {
             yield return new WaitForEndOfFrame();
 
+#if UNITY_WEBGL && !UNITY_EDITOR
+            completed?.Invoke(CaptureScaledJpeg(targetWidth, quality));
+            yield break;
+#endif
+
             if (!SystemInfo.supportsAsyncGPUReadback)
             {
                 completed?.Invoke(CaptureScaledJpeg(targetWidth, quality));
@@ -170,6 +185,14 @@ namespace MacacaGames.RuntimeBugReporter
         public static IEnumerator CaptureScaledRgbaAsync(int targetWidth, Action<byte[], int, int> completed)
         {
             yield return new WaitForEndOfFrame();
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+            // Fall through to CaptureScaledJpegAsync in RollingVideoRecorder.
+            // Keeping AsyncGPUReadback out of WebGL avoids READ-buffer fence
+            // churn and a potentially unbounded request.done wait.
+            completed?.Invoke(null, 0, 0);
+            yield break;
+#endif
 
             if (!SystemInfo.supportsAsyncGPUReadback)
             {

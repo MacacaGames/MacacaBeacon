@@ -64,7 +64,7 @@ macOS Editor／Standalone Player 使用套件內的 Universal Binary（Apple Sil
 | iOS device／Simulator | H.264 MP4；可選 AVI fallback |
 | Android device | H.264 MP4（MediaCodec／MediaMuxer）；可選 AVI fallback |
 | Linux | 目前使用 AVI fallback；介面已保留平台 encoder 擴充點 |
-| WebGL | 建議停用 rolling video |
+| WebGL | WebCodecs H.264 + 內建 MP4 muxer；不支援時可選 AVI fallback |
 
 macOS native source 位於 `Native~/macOS`，執行 `build.sh` 可重建 `Runtime/Plugins/macOS/MacacaBeaconVideo.bundle`。它只連結 Apple 系統 framework，沒有額外第三方 runtime dependency。
 
@@ -77,6 +77,8 @@ Android 使用 `Runtime/Plugins/Android/MacacaBeaconVideo.java`，透過 Android
 其他平台可以實作 `IVideoEncoderBackend`，並在遊戲初始化時呼叫 `BugReporter.SetVideoEncoder(backend)`。Backend 會收到含 frame format、尺寸、temporary data path 與 realtime timestamp 的唯讀 frame list，並可用 `ReadData()` 逐張載入，避免一次載入整段影片；成功後套件會自動接手本地 staging、Slack 上傳與清理。
 
 每個 frame 會記錄 double precision realtime timestamp，歷史緩衝依秒數而非 frame 數裁切。MP4 使用各 frame 的實際 presentation timestamp，並將最後一幀延伸到設定的 incident end；AVI fallback 也依實際捕捉時長產生時基。裝置無法達到設定 FPS 時只會降低流暢度，不會再把 8 秒內容加速成較短影片。若 Play Mode／Player 啟動尚未滿 `Seconds Before`，則只能保留啟動後實際存在的歷史畫面。
+
+WebGL 使用瀏覽器原生 WebCodecs H.264 encoder，再由套件內的 MP4 muxer 封裝輸出；不使用 WebGPU 直接編碼，也不需要在遊戲啟動時下載 ffmpeg。瀏覽器必須支援 H.264 `VideoEncoder`、`VideoFrame` 與 `createImageBitmap`，且通常需要 HTTPS 或 localhost。若瀏覽器不支援 WebCodecs，`Allow Legacy Avi Fallback` 開啟時會退回 managed MJPEG AVI。
 
 為避免記憶體／Slack 上傳失控，每個附件受 `Maximum Attachment Megabytes` 限制。影片不包含音訊，UI 在後段畫面收集與影片封裝完成前會暫時停用 Send。
 

@@ -136,6 +136,16 @@ namespace MacacaGames.RuntimeBugReporter
             while (true)
             {
                 yield return waitForFrame;
+                // Finalization must not depend on successfully capturing one more frame.
+                // WebGL can remain below the capture budget after the report UI opens;
+                // the frame-skip guard below would otherwise leave incidentFrames alive
+                // forever and keep the UI stuck on "Video recording".
+                if (incidentFrames != null && Time.realtimeSinceStartupAsDouble >= incidentEndTime)
+                {
+                    Debug.Log("[Macaca Beacon] Incident after-window elapsed; starting video finalization with " + incidentFrames.Count + " frames.");
+                    BeginFinishIncident();
+                    continue;
+                }
                 // Once the incident clip has collected its after-window, stop
                 // taking new screenshots while the encoder finalizes. This
                 // avoids competing with gameplay for GPU readback and JPEG
@@ -181,6 +191,17 @@ namespace MacacaGames.RuntimeBugReporter
                 VideoCaptureFrame capturedFrame;
                 if (frameFormat == VideoCaptureFrameFormat.Rgba32)
                 {
+#if UNITY_WEBGL && !UNITY_EDITOR
+                    // Emscripten's filesystem is backed by the same WebAssembly
+                    // memory. Keeping the short rolling window in memory avoids a
+                    // blocking write/read round-trip for every raw frame.
+                    capturedFrame = new VideoCaptureFrame(
+                        frame,
+                        frameFormat,
+                        frameWidth,
+                        frameHeight,
+                        Time.realtimeSinceStartupAsDouble);
+#else
                     if (string.IsNullOrEmpty(frameCacheDirectory))
                     {
                         frameCacheDirectory = Path.Combine(Application.temporaryCachePath, "MacacaBeacon", "RollingFrames-" + Guid.NewGuid().ToString("N"));
@@ -197,6 +218,7 @@ namespace MacacaGames.RuntimeBugReporter
                         continue;
                     }
                     capturedFrame = new VideoCaptureFrame(framePath, frameFormat, frameWidth, frameHeight, frame.Length, Time.realtimeSinceStartupAsDouble);
+#endif
                 }
                 else
                 {
@@ -260,7 +282,53 @@ namespace MacacaGames.RuntimeBugReporter
             var outputStem = Path.Combine(captureDirectory, "incident-" + Guid.NewGuid().ToString("N"));
             string encoderError = null;
             VideoCaptureResult result = null;
-#if UNITY_ANDROID && !UNITY_EDITOR
+#if UNITY_WEBGL && !UNITY_EDITOR
+            if (settings.preferMp4)
+            {
+                yield return WebGlWebCodecsMp4Encoder.TryEncodeAsync(
+                    outputStem + WebGlWebCodecsMp4Encoder.Extension,
+                    frames,
+                    capturedWidth,
+                    capturedHeight,
+                    settings.videoFramesPerSecond,
+                    settings.videoBitrateKbps,
+                    durationSeconds,
+                    (value, error) =>
+                    {
+                        result = value;
+                        encoderError = error;
+                    });
+
+                if (result == null && settings.allowLegacyAviFallback)
+                {
+                    result = VideoEncoderBackend.Encode(
+                        outputStem,
+                        frames,
+                        capturedWidth,
+                        capturedHeight,
+                        settings.videoFramesPerSecond,
+                        settings.videoBitrateKbps,
+                        durationSeconds,
+                        false,
+                        true,
+                        out encoderError);
+                }
+            }
+            else
+            {
+                result = VideoEncoderBackend.Encode(
+                    outputStem,
+                    frames,
+                    capturedWidth,
+                    capturedHeight,
+                    settings.videoFramesPerSecond,
+                    settings.videoBitrateKbps,
+                    durationSeconds,
+                    settings.preferMp4,
+                    settings.allowLegacyAviFallback,
+                    out encoderError);
+            }
+#elif UNITY_ANDROID && !UNITY_EDITOR
             if (settings.preferMp4 && BugReporter.VideoEncoderOverride == null && AreRawFileFrames(frames))
             {
                 var androidEncoder = new AndroidMediaCodecMp4Encoder();
