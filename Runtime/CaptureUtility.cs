@@ -61,10 +61,13 @@ namespace MacacaGames.RuntimeBugReporter
                         var vulkanScreenshotNeedsFlip =
                             Application.platform == RuntimePlatform.Android &&
                             SystemInfo.graphicsDeviceType == GraphicsDeviceType.Vulkan;
+                        var windowsScreenshotNeedsFlip =
+                            Application.platform == RuntimePlatform.WindowsEditor ||
+                            Application.platform == RuntimePlatform.WindowsPlayer;
                         var nonAndroidOriginNeedsFlip =
                             Application.platform != RuntimePlatform.Android &&
                             !SystemInfo.graphicsUVStartsAtTop;
-                        if (flipScreenshotRows || vulkanScreenshotNeedsFlip || nonAndroidOriginNeedsFlip)
+                        if (flipScreenshotRows || vulkanScreenshotNeedsFlip || windowsScreenshotNeedsFlip || nonAndroidOriginNeedsFlip)
                         {
                             EnsureRowSwapBuffer(width * 4);
                             FlipRowsInPlace(readbackBuffer, rowSwapBuffer, width, height, 4);
@@ -260,7 +263,10 @@ namespace MacacaGames.RuntimeBugReporter
 #else
                     const bool flipVideoRows = false;
 #endif
-                    if (flipVideoRows || !SystemInfo.graphicsUVStartsAtTop)
+                    var windowsVideoNeedsFlip =
+                        Application.platform == RuntimePlatform.WindowsEditor ||
+                        Application.platform == RuntimePlatform.WindowsPlayer;
+                    if (flipVideoRows || windowsVideoNeedsFlip || !SystemInfo.graphicsUVStartsAtTop)
                         FlipRowsInPlace(frame, rowSwapBuffer, width, height, 4);
                 }
             }
