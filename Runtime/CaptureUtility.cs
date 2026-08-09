@@ -50,7 +50,16 @@ namespace MacacaGames.RuntimeBugReporter
                         EnsureReadbackBuffers(raw.Length, width * 4);
                         raw.CopyTo(readbackBuffer);
 #if !UNITY_ANDROID || UNITY_EDITOR
-                        if (!SystemInfo.graphicsUVStartsAtTop)
+                        // iOS Metal's screenshot readback is bottom-left based even
+                        // when graphicsUVStartsAtTop reports the render target origin.
+                        // Keep the final PNG in the same top-left orientation as the
+                        // Game View and the annotation UI.
+#if UNITY_IOS && !UNITY_EDITOR
+                        const bool flipScreenshotRows = true;
+#else
+                        const bool flipScreenshotRows = false;
+#endif
+                        if (flipScreenshotRows || !SystemInfo.graphicsUVStartsAtTop)
                         {
                             EnsureRowSwapBuffer(width * 4);
                             FlipRowsInPlace(readbackBuffer, rowSwapBuffer, width, height, 4);
@@ -242,8 +251,13 @@ namespace MacacaGames.RuntimeBugReporter
                     // Use the active graphics backend instead of hard-coding
                     // platform names. Metal, Vulkan, GLES and D3D can expose
                     // different texture origins between Editor and Player.
-                    if (!SystemInfo.graphicsUVStartsAtTop)
-                    FlipRowsInPlace(frame, rowSwapBuffer, width, height, 4);
+#if UNITY_IOS && !UNITY_EDITOR
+                    const bool flipVideoRows = true;
+#else
+                    const bool flipVideoRows = false;
+#endif
+                    if (flipVideoRows || !SystemInfo.graphicsUVStartsAtTop)
+                        FlipRowsInPlace(frame, rowSwapBuffer, width, height, 4);
                 }
             }
             finally

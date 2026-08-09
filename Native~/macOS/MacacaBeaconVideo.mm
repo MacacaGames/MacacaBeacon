@@ -7,7 +7,6 @@
 #import <VideoToolbox/VideoToolbox.h>
 #import <dispatch/dispatch.h>
 #import <Metal/Metal.h>
-#import <IOSurface/IOSurface.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -551,6 +550,15 @@ extern "C" __attribute__((visibility("default"))) void MacacaBeaconVideo_Destroy
 {
     auto* session = static_cast<MacacaBeaconVideoSession*>(handle);
     delete session;
+}
+
+extern "C" __attribute__((visibility("default"))) int MacacaBeaconVideo_GetBuildNumber()
+{
+    @autoreleasepool
+    {
+        NSString* buildNumber = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"];
+        return buildNumber == nil ? -1 : [buildNumber intValue];
+    }
 }
 
 extern "C" __attribute__((visibility("default"))) int MacacaBeaconVideo_ConcatSegments(

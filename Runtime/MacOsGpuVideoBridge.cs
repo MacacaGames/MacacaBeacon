@@ -8,7 +8,7 @@ using UnityEngine.Rendering;
 namespace MacacaGames.RuntimeBugReporter
 {
     /// <summary>
-    /// Render-thread bridge for the macOS Metal texture encoder. The texture
+    /// Render-thread bridge for the Apple Metal texture encoder. The texture
     /// is submitted without AsyncGPUReadback or Texture2D conversion.
     /// </summary>
     internal static class MacOsGpuVideoBridge
@@ -17,7 +17,7 @@ namespace MacacaGames.RuntimeBugReporter
         {
             get
             {
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
                 if (SystemInfo.graphicsDeviceType != GraphicsDeviceType.Metal)
                     return false;
                 try { return NativeIsAvailable() != 0; }
@@ -31,7 +31,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         public static bool Submit(IntPtr session, GpuFrameCapture.GpuFrame frame, double presentationSeconds)
         {
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
             if (session == IntPtr.Zero || !frame.IsValid || !IsAvailable)
                 return false;
 
@@ -51,7 +51,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         public static IntPtr CreateSession(string outputPath, int width, int height, int framesPerSecond, int bitrateKbps)
         {
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
             if (!IsAvailable)
                 return IntPtr.Zero;
             try
@@ -67,7 +67,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         public static bool FinishSession(IntPtr session)
         {
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
             return session != IntPtr.Zero && NativeFinish(session) != 0;
 #else
             return false;
@@ -76,7 +76,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         public static string GetLastError(IntPtr session)
         {
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
             var pointer = NativeLastError(session);
             return pointer == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(pointer);
 #else
@@ -86,7 +86,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         public static void DestroySession(IntPtr session)
         {
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
             if (session != IntPtr.Zero)
                 NativeDestroy(session);
 #endif
@@ -94,7 +94,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         public static bool ConcatSegments(string outputPath, IReadOnlyList<string> inputPaths)
         {
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
             if (string.IsNullOrEmpty(outputPath) || inputPaths == null || inputPaths.Count == 0)
                 return false;
 
@@ -129,7 +129,7 @@ namespace MacacaGames.RuntimeBugReporter
 #endif
         }
 
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
         private static IntPtr AllocateUtf8(string value)
         {
             var bytes = Encoding.UTF8.GetBytes((value ?? string.Empty) + "\0");
@@ -139,32 +139,68 @@ namespace MacacaGames.RuntimeBugReporter
         }
 #endif
 
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_Create")]
+#else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_Create")]
+#endif
         private static extern IntPtr NativeCreate([MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath, int width, int height, int framesPerSecond, int bitrate);
 
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_GpuCreate")]
+#else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_GpuCreate")]
+#endif
         private static extern IntPtr NativeGpuCreate([MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath, int width, int height, int framesPerSecond, int bitrate);
 
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_Finish")]
+#else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_Finish")]
+#endif
         private static extern int NativeFinish(IntPtr session);
 
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_LastError")]
+#else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_LastError")]
+#endif
         private static extern IntPtr NativeLastError(IntPtr session);
 
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_Destroy")]
+#else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_Destroy")]
+#endif
         private static extern void NativeDestroy(IntPtr session);
 
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_GpuIsAvailable")]
+#else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_GpuIsAvailable")]
+#endif
         private static extern int NativeIsAvailable();
 
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_GpuGetRenderEventFunc")]
+#else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_GpuGetRenderEventFunc")]
+#endif
         private static extern IntPtr NativeGetRenderEventFunc();
 
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_GpuAllocateSubmitData")]
+#else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_GpuAllocateSubmitData")]
+#endif
         private static extern IntPtr NativeAllocateSubmitData(IntPtr session, IntPtr nativeTexture, double presentationSeconds);
 
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_ConcatSegments")]
+#else
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_ConcatSegments")]
+#endif
         private static extern int NativeConcatSegments(IntPtr outputPath, IntPtr inputPaths, int inputCount);
 #endif
     }

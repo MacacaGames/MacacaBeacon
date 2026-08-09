@@ -29,7 +29,7 @@ PluginImporter:
       enabled: 1
       settings:
         CompileFlags: -fobjc-arc
-        FrameworkDependencies: AVFoundation;CoreGraphics;CoreMedia;CoreVideo;ImageIO;VideoToolbox
+        FrameworkDependencies: AVFoundation;CoreGraphics;CoreMedia;CoreVideo;ImageIO;Metal;VideoToolbox
   - first:
       Standalone: OSXUniversal
     second:

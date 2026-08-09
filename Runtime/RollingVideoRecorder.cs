@@ -42,7 +42,7 @@ namespace MacacaGames.RuntimeBugReporter
         {
             this.host = host;
             this.settings = settings;
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
             if (EnableExperimentalMacOsGpuPath && MacOsGpuVideoBridge.IsAvailable)
                 gpuRecorder = new MacOsGpuRollingVideoRecorder(host, settings);
 #endif
