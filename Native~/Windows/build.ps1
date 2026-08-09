@@ -19,6 +19,19 @@ if (-not $VisualStudio) {
     throw "Visual Studio 2022 C++ x64 build tools were not found."
 }
 
+$UnityPluginApi = $env:UNITY_PLUGIN_API
+if (-not $UnityPluginApi) {
+    $UnityEditorRoot = Join-Path ${env:ProgramFiles} "Unity\Hub\Editor"
+    $UnityPluginApi = Get-ChildItem $UnityEditorRoot -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending |
+        ForEach-Object { Join-Path $_.FullName "Editor\Data\PluginAPI" } |
+        Where-Object { Test-Path (Join-Path $_ "IUnityGraphicsD3D12.h") } |
+        Select-Object -First 1
+}
+if (-not $UnityPluginApi -or -not (Test-Path (Join-Path $UnityPluginApi "IUnityGraphicsD3D12.h"))) {
+    throw "Unity PluginAPI headers were not found. Set UNITY_PLUGIN_API to <UnityEditor>\Editor\Data\PluginAPI."
+}
+
 $DeveloperCommand = Join-Path $VisualStudio "Common7\Tools\VsDevCmd.bat"
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 
@@ -27,7 +40,7 @@ $SourcePath = Join-Path $SourceDirectory "MacacaBeaconVideoWindows.cpp"
 $ObjectPath = Join-Path $env:TEMP "MacacaBeaconVideoWindows.obj"
 $ImportLibraryPath = Join-Path $env:TEMP "MacacaBeaconVideoWindows.lib"
 $PdbPath = Join-Path $OutputDirectory "MacacaBeaconVideoWindows.pdb"
-$Command = 'call "{0}" -no_logo -arch=x64 -host_arch=x64 && cl.exe /nologo /std:c++17 /EHsc /W4 {1} /DUNICODE /D_UNICODE /c "{2}" /Fo"{3}" && link.exe /nologo /DLL /MACHINE:X64 /LTCG /OUT:"{4}" /IMPLIB:"{5}" /PDB:"{6}" "{3}" mfplat.lib mfreadwrite.lib mfuuid.lib windowscodecs.lib shlwapi.lib ole32.lib' -f $DeveloperCommand, $CompilerFlags, $SourcePath, $ObjectPath, $OutputPath, $ImportLibraryPath, $PdbPath
+$Command = 'call "{0}" -no_logo -arch=x64 -host_arch=x64 && cl.exe /nologo /std:c++17 /EHsc /W4 /I"{1}" {2} /DUNICODE /D_UNICODE /c "{3}" /Fo"{4}" && link.exe /nologo /DLL /MACHINE:X64 /LTCG /OUT:"{5}" /IMPLIB:"{6}" /PDB:"{7}" "{4}" mfplat.lib mfreadwrite.lib mfuuid.lib windowscodecs.lib shlwapi.lib ole32.lib d3d11.lib d3d12.lib dxgi.lib' -f $DeveloperCommand, $UnityPluginApi, $CompilerFlags, $SourcePath, $ObjectPath, $OutputPath, $ImportLibraryPath, $PdbPath
 
 & $env:ComSpec /d /s /c $Command
 if ($LASTEXITCODE -ne 0) {

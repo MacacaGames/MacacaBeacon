@@ -14,7 +14,8 @@ namespace MacacaGames.RuntimeBugReporter
             get
             {
 #if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
-                if (SystemInfo.graphicsDeviceType != GraphicsDeviceType.Direct3D11)
+                if (SystemInfo.graphicsDeviceType != GraphicsDeviceType.Direct3D11 &&
+                    SystemInfo.graphicsDeviceType != GraphicsDeviceType.Direct3D12)
                     return false;
                 try { return NativeIsAvailable() != 0 && NativeGpuIsAvailable() != 0; }
                 catch (DllNotFoundException) { return false; }
@@ -33,8 +34,11 @@ namespace MacacaGames.RuntimeBugReporter
                 return IntPtr.Zero;
             try
             {
-                return NativeGpuCreate(outputPath, frame.Width, frame.Height, framesPerSecond,
-                    Math.Max(128, bitrateKbps) * 1000, frame.NativeTexturePtr);
+                var bitrate = Math.Max(128, bitrateKbps) * 1000;
+                return SystemInfo.graphicsDeviceType == GraphicsDeviceType.Direct3D12
+                    ? NativeGpuCreateD3D12(outputPath, frame.Width, frame.Height, framesPerSecond, bitrate)
+                    : NativeGpuCreate(outputPath, frame.Width, frame.Height, framesPerSecond,
+                        bitrate, frame.NativeTexturePtr);
             }
             catch (DllNotFoundException) { return IntPtr.Zero; }
             catch (EntryPointNotFoundException) { return IntPtr.Zero; }
@@ -51,11 +55,16 @@ namespace MacacaGames.RuntimeBugReporter
                 return false;
             try
             {
+                if (!string.IsNullOrEmpty(GetLastError(session)))
+                    return false;
+                var eventId = NativeGetRenderEventId();
+                if (eventId <= 0)
+                    return false;
                 var data = NativeAllocateSubmitData(session, frame.NativeTexturePtr, presentationSeconds);
                 if (data == IntPtr.Zero)
                     return false;
                 var commandBuffer = new CommandBuffer { name = "Macaca Beacon GPU video submit" };
-                commandBuffer.IssuePluginEventAndData(NativeGetRenderEventFunc(), 1, data);
+                commandBuffer.IssuePluginEventAndData(NativeGetRenderEventFunc(), eventId, data);
                 Graphics.ExecuteCommandBuffer(commandBuffer);
                 commandBuffer.Release();
                 return true;
@@ -165,8 +174,12 @@ namespace MacacaGames.RuntimeBugReporter
         private static extern int NativeGpuIsAvailable();
         [DllImport("MacacaBeaconVideoWindows", EntryPoint = "MacacaBeaconWindowsVideo_GpuCreate", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr NativeGpuCreate([MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath, int width, int height, int framesPerSecond, int bitrate, IntPtr nativeTexture);
+        [DllImport("MacacaBeaconVideoWindows", EntryPoint = "MacacaBeaconWindowsVideo_GpuCreateD3D12", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr NativeGpuCreateD3D12([MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath, int width, int height, int framesPerSecond, int bitrate);
         [DllImport("MacacaBeaconVideoWindows", EntryPoint = "MacacaBeaconWindowsVideo_GpuGetRenderEventFunc", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr NativeGetRenderEventFunc();
+        [DllImport("MacacaBeaconVideoWindows", EntryPoint = "MacacaBeaconWindowsVideo_GpuGetRenderEventId", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int NativeGetRenderEventId();
         [DllImport("MacacaBeaconVideoWindows", EntryPoint = "MacacaBeaconWindowsVideo_GpuAllocateSubmitData", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr NativeAllocateSubmitData(IntPtr session, IntPtr nativeTexture, double presentationSeconds);
         [DllImport("MacacaBeaconVideoWindows", EntryPoint = "MacacaBeaconWindowsVideo_Finish", CallingConvention = CallingConvention.Cdecl)]
@@ -179,4 +192,38 @@ namespace MacacaGames.RuntimeBugReporter
         private static extern int NativeConcatSegments(IntPtr outputPath, IntPtr inputPaths, int inputCount);
 #endif
     }
+
+#if UNITY_EDITOR_WIN
+    /// <summary>
+    /// Editor-only entry point used by the automated D3D12 smoke test. It
+    /// exercises the same native session and render-event path as the rolling
+    /// recorder without depending on WaitForEndOfFrame in batch mode.
+    /// </summary>
+    public static class WindowsGpuVideoSmokeBridge
+    {
+        public static bool IsAvailable => WindowsGpuVideoBridge.IsAvailable;
+
+        public static IntPtr CreateSession(string outputPath, RenderTexture texture, int framesPerSecond, int bitrateKbps)
+        {
+            if (texture == null || !texture.IsCreated())
+                return IntPtr.Zero;
+            var frame = new GpuFrameCapture.GpuFrame(
+                texture, texture.GetNativeTexturePtr(), texture.width, texture.height);
+            return WindowsGpuVideoBridge.CreateSession(outputPath, frame, framesPerSecond, bitrateKbps);
+        }
+
+        public static bool Submit(IntPtr session, RenderTexture texture, double presentationSeconds)
+        {
+            if (texture == null || !texture.IsCreated())
+                return false;
+            var frame = new GpuFrameCapture.GpuFrame(
+                texture, texture.GetNativeTexturePtr(), texture.width, texture.height);
+            return WindowsGpuVideoBridge.Submit(session, frame, presentationSeconds);
+        }
+
+        public static bool FinishSession(IntPtr session) => WindowsGpuVideoBridge.FinishSession(session);
+        public static string GetLastError(IntPtr session) => WindowsGpuVideoBridge.GetLastError(session);
+        public static void DestroySession(IntPtr session) => WindowsGpuVideoBridge.DestroySession(session);
+    }
+#endif
 }

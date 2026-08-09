@@ -7,8 +7,15 @@
 #include <mfreadwrite.h>
 #include <shlwapi.h>
 #include <wincodec.h>
+#include <d3d10_1.h>
 #include <d3d11.h>
+#include <d3d11_4.h>
+#include <d3d12.h>
 #include <dxgi.h>
+#include <dxgi1_6.h>
+
+#include "IUnityGraphics.h"
+#include "IUnityGraphicsD3D12.h"
 
 #include <algorithm>
 #include <cmath>
@@ -27,11 +34,18 @@
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "d3d12.lib")
+#pragma comment(lib, "dxgi.lib")
 #endif
 
 namespace
 {
     std::string g_availabilityError;
+    IUnityInterfaces* g_unityInterfaces = nullptr;
+    IUnityGraphics* g_unityGraphics = nullptr;
+    IUnityGraphicsD3D12v8* g_unityD3D12 = nullptr;
+    IUnityGraphicsD3D12* g_unityD3D12Legacy = nullptr;
+    int g_renderEventId = 1;
 
     template <typename T>
     void SafeRelease(T*& pointer)
@@ -92,11 +106,56 @@ namespace
         bool ready = false;
         bool finalized = false;
         bool gpuInput = false;
+        bool d3d12Input = false;
         volatile LONG pendingGpuEvents = 0;
         std::string lastError;
+        std::string outputPathUtf8;
+        std::wstring outputPath;
+        int bitrate = 0;
+        EncoderSession* d3d12Delegate = nullptr;
+        ID3D12Device* d3d12Device = nullptr;
+        ID3D12CommandAllocator* d3d12CommandAllocator = nullptr;
+        ID3D12GraphicsCommandList* d3d12CommandList = nullptr;
+        ID3D12Resource* d3d12SharedTexture = nullptr;
+        ID3D11Texture2D* d3d11SharedTexture = nullptr;
+        ID3D11Texture2D* d3d11CopyTexture = nullptr;
+        ID3D12Fence* sharedFence = nullptr;
+        ID3D12Fence* d3d12ReleaseFence = nullptr;
+        ID3D11DeviceContext4* d3d11Context4 = nullptr;
+        ID3D11Query* d3d11CompletionQuery = nullptr;
+        UINT64 sharedFenceValue = 0;
+        UINT64 pendingD3D12FenceValue = 0;
+        UINT64 d3d12ReleaseFenceValue = 0;
+        bool d3d12FramePending = false;
+        double pendingPresentationSeconds = 0.0;
+        volatile LONG d3d12WorkerBusy = 0;
+        volatile LONG d3d12WorkerStop = 0;
+        volatile LONG d3d12WorkerInitialized = 0;
+        volatile LONG d3d12WorkerFinalizeRequested = 0;
+        volatile LONG d3d12WorkerFinalizeResult = 0;
+        HANDLE d3d12WorkerThread = nullptr;
+        HANDLE d3d12WorkerWakeEvent = nullptr;
+        HANDLE d3d12WorkerIdleEvent = nullptr;
+        HANDLE d3d12WorkerReadyEvent = nullptr;
+        HANDLE sharedFenceEvent = nullptr;
+        HANDLE sharedTextureHandle = nullptr;
 
         ~EncoderSession()
         {
+            if (d3d12WorkerThread != nullptr)
+            {
+                InterlockedExchange(&d3d12WorkerStop, 1);
+                if (d3d12WorkerWakeEvent != nullptr)
+                    SetEvent(d3d12WorkerWakeEvent);
+                WaitForSingleObject(d3d12WorkerThread, 10000);
+                CloseHandle(d3d12WorkerThread);
+            }
+            if (d3d12WorkerWakeEvent != nullptr)
+                CloseHandle(d3d12WorkerWakeEvent);
+            if (d3d12WorkerIdleEvent != nullptr)
+                CloseHandle(d3d12WorkerIdleEvent);
+            if (d3d12WorkerReadyEvent != nullptr)
+                CloseHandle(d3d12WorkerReadyEvent);
             SafeRelease(writer);
             SafeRelease(imagingFactory);
             SafeRelease(videoSampleAllocator);
@@ -106,6 +165,20 @@ namespace
             SafeRelease(videoContext);
             SafeRelease(videoDevice);
             SafeRelease(d3dDevice);
+            // D3D11, Media Foundation and their delegate are created and
+            // released by the encoder worker that uses them.
+            SafeRelease(d3d12ReleaseFence);
+            SafeRelease(sharedFence);
+            SafeRelease(d3d11SharedTexture);
+            SafeRelease(d3d11CopyTexture);
+            SafeRelease(d3d12SharedTexture);
+            SafeRelease(d3d12CommandList);
+            SafeRelease(d3d12CommandAllocator);
+            SafeRelease(d3d12Device);
+            if (sharedFenceEvent != nullptr)
+                CloseHandle(sharedFenceEvent);
+            if (sharedTextureHandle != nullptr)
+                CloseHandle(sharedTextureHandle);
             if (mediaFoundationStarted)
                 MFShutdown();
             if (uninitializeCom)
@@ -410,6 +483,60 @@ namespace
         SafeRelease(sample);
         return SUCCEEDED(result) || session->Fail("Media Foundation rejected a D3D11 texture frame", result);
     }
+
+    void ConfigureD3D12PluginEvent()
+    {
+        if (g_unityD3D12 == nullptr || g_renderEventId <= 0)
+            return;
+        UnityD3D12PluginEventConfig config = {};
+        config.graphicsQueueAccess = kUnityD3D12GraphicsQueueAccess_Allow;
+        config.flags = kUnityD3D12EventConfigFlag_FlushCommandBuffers |
+            kUnityD3D12EventConfigFlag_SyncWorkerThreads;
+        config.ensureActiveRenderTextureIsBound = false;
+        g_unityD3D12->ConfigureEvent(g_renderEventId, &config);
+    }
+
+    void UNITY_INTERFACE_API OnGraphicsDeviceEvent(UnityGfxDeviceEventType eventType)
+    {
+        if (g_unityGraphics == nullptr || g_unityInterfaces == nullptr)
+            return;
+        if (eventType == kUnityGfxDeviceEventInitialize &&
+            g_unityGraphics->GetRenderer() == kUnityGfxRendererD3D12)
+        {
+            g_unityD3D12 = g_unityInterfaces->Get<IUnityGraphicsD3D12v8>();
+            g_unityD3D12Legacy = g_unityInterfaces->Get<IUnityGraphicsD3D12>();
+            ConfigureD3D12PluginEvent();
+        }
+        else if (eventType == kUnityGfxDeviceEventShutdown)
+        {
+            g_unityD3D12 = nullptr;
+            g_unityD3D12Legacy = nullptr;
+        }
+    }
+}
+
+extern "C" UNITY_INTERFACE_EXPORT void UNITY_INTERFACE_API UnityPluginLoad(IUnityInterfaces* unityInterfaces)
+{
+    g_unityInterfaces = unityInterfaces;
+    g_unityGraphics = unityInterfaces == nullptr ? nullptr : unityInterfaces->Get<IUnityGraphics>();
+    if (g_unityGraphics != nullptr)
+    {
+        g_renderEventId = g_unityGraphics->ReserveEventIDRange(1);
+        if (g_renderEventId <= 0)
+            g_renderEventId = 1;
+        g_unityGraphics->RegisterDeviceEventCallback(OnGraphicsDeviceEvent);
+        OnGraphicsDeviceEvent(kUnityGfxDeviceEventInitialize);
+    }
+}
+
+extern "C" UNITY_INTERFACE_EXPORT void UNITY_INTERFACE_API UnityPluginUnload()
+{
+    if (g_unityGraphics != nullptr)
+        g_unityGraphics->UnregisterDeviceEventCallback(OnGraphicsDeviceEvent);
+    g_unityD3D12 = nullptr;
+    g_unityD3D12Legacy = nullptr;
+    g_unityGraphics = nullptr;
+    g_unityInterfaces = nullptr;
 }
 
 extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_IsAvailable()
@@ -563,6 +690,486 @@ static EncoderSession* CreateEncoderSession(
     return session;
 }
 
+static EncoderSession* CreateD3D12PendingSession(
+    const char* outputPath,
+    int width,
+    int height,
+    int framesPerSecond,
+    int bitrate)
+{
+    EncoderSession* session = new (std::nothrow) EncoderSession();
+    if (session == nullptr)
+        return nullptr;
+    session->width = std::max(2, width & ~1);
+    session->height = std::max(2, height & ~1);
+    session->framesPerSecond = std::max(1, framesPerSecond);
+    session->frameDuration = 10000000LL / session->framesPerSecond;
+    session->d3d12Input = true;
+    session->outputPathUtf8 = outputPath == nullptr ? std::string() : outputPath;
+    session->outputPath = Utf8ToWide(outputPath);
+    session->bitrate = std::max(128000, bitrate);
+    if (session->outputPath.empty())
+        session->lastError = "The MP4 output path was empty or invalid UTF-8.";
+    return session;
+}
+
+static bool WaitForSharedFence(EncoderSession* session, UINT64 value)
+{
+    if (session == nullptr || session->sharedFence == nullptr || value == 0)
+        return true;
+    if (session->sharedFence->GetCompletedValue() >= value)
+        return true;
+    if (session->sharedFenceEvent == nullptr)
+        session->sharedFenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (session->sharedFenceEvent == nullptr)
+        return false;
+    HRESULT result = session->sharedFence->SetEventOnCompletion(value, session->sharedFenceEvent);
+    if (FAILED(result))
+        return session->Fail("Could not wait for the D3D12 shared fence", result);
+    const DWORD waitResult = WaitForSingleObject(session->sharedFenceEvent, 10000);
+    if (waitResult == WAIT_OBJECT_0)
+        return true;
+    const HRESULT deviceResult = session->d3d12Device == nullptr
+        ? E_FAIL
+        : session->d3d12Device->GetDeviceRemovedReason();
+    return session->Fail("Timed out waiting for D3D11/D3D12 shared-fence ownership", FAILED(deviceResult) ? deviceResult : E_FAIL);
+}
+
+static bool WaitForD3D11Completion(EncoderSession* session)
+{
+    if (session == nullptr || session->d3d11Context4 == nullptr ||
+        session->d3d11CompletionQuery == nullptr)
+        return false;
+    const ULONGLONG deadline = GetTickCount64() + 10000;
+    while (true)
+    {
+        const HRESULT result = session->d3d11Context4->GetData(
+            session->d3d11CompletionQuery, nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        if (result == S_OK)
+            return true;
+        if (FAILED(result))
+            return session->Fail("Could not wait for the D3D11 GPU capture", result);
+        if (GetTickCount64() >= deadline)
+        {
+            const HRESULT deviceResult = session->d3d12Device == nullptr
+                ? E_FAIL
+                : session->d3d12Device->GetDeviceRemovedReason();
+            return session->Fail("Timed out waiting for the D3D11 GPU capture", FAILED(deviceResult) ? deviceResult : E_FAIL);
+        }
+        Sleep(1);
+    }
+}
+
+static bool InitializeD3D11EncoderWorker(EncoderSession* session)
+{
+    if (session == nullptr || session->d3d12Device == nullptr)
+        return false;
+
+    IDXGIFactory6* factory = nullptr;
+    IDXGIAdapter1* adapter = nullptr;
+    ID3D11Device* interopDevice = nullptr;
+    ID3D11DeviceContext* interopContext = nullptr;
+    ID3D11Device5* interopDevice5 = nullptr;
+    ID3D10Multithread* multithread = nullptr;
+    const char* failedOperation = "CreateDXGIFactory1";
+    HRESULT result = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "EnumAdapterByLuid";
+        result = factory->EnumAdapterByLuid(
+            session->d3d12Device->GetAdapterLuid(), IID_PPV_ARGS(&adapter));
+    }
+    const D3D_FEATURE_LEVEL featureLevels[] = {
+        D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0
+    };
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "D3D11CreateDevice";
+        result = D3D11CreateDevice(
+            adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+            featureLevels, ARRAYSIZE(featureLevels), D3D11_SDK_VERSION,
+            &interopDevice, nullptr, &interopContext);
+    }
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "QueryInterface ID3D10Multithread";
+        result = interopContext->QueryInterface(IID_PPV_ARGS(&multithread));
+    }
+    if (SUCCEEDED(result))
+        multithread->SetMultithreadProtected(TRUE);
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "QueryInterface ID3D11Device5";
+        result = interopDevice->QueryInterface(IID_PPV_ARGS(&interopDevice5));
+    }
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "QueryInterface ID3D11DeviceContext4";
+        result = interopContext->QueryInterface(IID_PPV_ARGS(&session->d3d11Context4));
+    }
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "OpenSharedResource1 texture";
+        result = interopDevice5->OpenSharedResource1(
+            session->sharedTextureHandle, IID_PPV_ARGS(&session->d3d11SharedTexture));
+    }
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "Create D3D11 video processor texture";
+        D3D11_TEXTURE2D_DESC copyDescription = {};
+        copyDescription.Width = static_cast<UINT>(session->width);
+        copyDescription.Height = static_cast<UINT>(session->height);
+        copyDescription.MipLevels = 1;
+        copyDescription.ArraySize = 1;
+        copyDescription.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        copyDescription.SampleDesc.Count = 1;
+        copyDescription.Usage = D3D11_USAGE_DEFAULT;
+        copyDescription.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        result = interopDevice->CreateTexture2D(
+            &copyDescription, nullptr, &session->d3d11CopyTexture);
+    }
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "Create D3D11 completion query";
+        D3D11_QUERY_DESC queryDescription = {};
+        queryDescription.Query = D3D11_QUERY_EVENT;
+        result = interopDevice->CreateQuery(
+            &queryDescription, &session->d3d11CompletionQuery);
+    }
+    SafeRelease(multithread);
+    SafeRelease(interopDevice5);
+    SafeRelease(interopContext);
+    SafeRelease(interopDevice);
+    SafeRelease(adapter);
+    SafeRelease(factory);
+    if (FAILED(result))
+        return session->Fail(failedOperation, result);
+
+    session->d3d12Delegate = CreateEncoderSession(
+        session->outputPathUtf8.c_str(), session->width, session->height,
+        session->framesPerSecond, session->bitrate, session->d3d11CopyTexture);
+    if (session->d3d12Delegate == nullptr || !session->d3d12Delegate->ready)
+    {
+        if (session->d3d12Delegate != nullptr && !session->d3d12Delegate->lastError.empty())
+            session->lastError = session->d3d12Delegate->lastError;
+        else
+            session->lastError = "Could not initialize the D3D12 Media Foundation delegate.";
+        return false;
+    }
+    return true;
+}
+
+static DWORD WINAPI D3D12EncoderWorker(void* context);
+
+static bool InitializeD3D12Interop(EncoderSession* session, ID3D12Resource* source)
+{
+    if (session == nullptr || source == nullptr || g_unityD3D12 == nullptr)
+        return session != nullptr && session->Fail("Unity D3D12 interfaces are unavailable", E_NOINTERFACE);
+
+    D3D12_RESOURCE_DESC sourceDescription = source->GetDesc();
+    if (sourceDescription.Width != static_cast<UINT64>(session->width) ||
+        sourceDescription.Height != static_cast<UINT>(session->height) ||
+        (sourceDescription.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+         sourceDescription.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB &&
+         sourceDescription.Format != DXGI_FORMAT_B8G8R8A8_TYPELESS))
+        return session->Fail("The D3D12 capture texture must be BGRA8 and match the encoder dimensions", E_INVALIDARG);
+
+    ID3D12Device* device = g_unityD3D12->GetDevice();
+    if (device == nullptr)
+        return session->Fail("Unity did not provide a D3D12 device", E_POINTER);
+    device->AddRef();
+    session->d3d12Device = device;
+
+    const char* failedOperation = "CreateCommittedResource shared texture";
+    HRESULT result = S_OK;
+
+    D3D12_HEAP_PROPERTIES heapProperties = {};
+    heapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC sharedDescription = {};
+    sharedDescription.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    sharedDescription.Width = static_cast<UINT64>(session->width);
+    sharedDescription.Height = static_cast<UINT>(session->height);
+    sharedDescription.DepthOrArraySize = 1;
+    sharedDescription.MipLevels = 1;
+    sharedDescription.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    sharedDescription.SampleDesc.Count = 1;
+    sharedDescription.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    // D3D11 maps ALLOW_RENDER_TARGET to D3D11_BIND_RENDER_TARGET and, because
+    // shader resources are not denied, exposes the SRV bind required by the
+    // video processor when it opens this D3D12 shared texture.
+    sharedDescription.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+        D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "CreateCommittedResource shared texture";
+        result = device->CreateCommittedResource(
+            &heapProperties, D3D12_HEAP_FLAG_SHARED, &sharedDescription,
+            D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&session->d3d12SharedTexture));
+    }
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "CreateSharedHandle texture";
+        result = device->CreateSharedHandle(
+            session->d3d12SharedTexture, nullptr, GENERIC_ALL, nullptr, &session->sharedTextureHandle);
+    }
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "CreateFence capture fence";
+        result = device->CreateFence(
+            0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&session->sharedFence));
+    }
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "CreateFence release fence";
+        result = device->CreateFence(
+            0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&session->d3d12ReleaseFence));
+    }
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "CreateCommandAllocator";
+        result = device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&session->d3d12CommandAllocator));
+    }
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "CreateCommandList";
+        result = device->CreateCommandList(
+            0, D3D12_COMMAND_LIST_TYPE_DIRECT, session->d3d12CommandAllocator,
+            nullptr, IID_PPV_ARGS(&session->d3d12CommandList));
+    }
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "CloseCommandList";
+        result = session->d3d12CommandList->Close();
+    }
+    if (FAILED(result))
+        return session->Fail(failedOperation, result);
+
+
+    session->d3d12WorkerWakeEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    session->d3d12WorkerIdleEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    session->d3d12WorkerReadyEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (session->d3d12WorkerWakeEvent == nullptr || session->d3d12WorkerIdleEvent == nullptr ||
+        session->d3d12WorkerReadyEvent == nullptr)
+        return session->Fail("Could not create the D3D12 encoder worker events", HRESULT_FROM_WIN32(GetLastError()));
+    session->d3d12WorkerThread = CreateThread(
+        nullptr, 0, &D3D12EncoderWorker, session, 0, nullptr);
+    if (session->d3d12WorkerThread == nullptr)
+        return session->Fail("Could not create the D3D12 encoder worker", HRESULT_FROM_WIN32(GetLastError()));
+    if (WaitForSingleObject(session->d3d12WorkerReadyEvent, 10000) != WAIT_OBJECT_0)
+        return session->Fail("Timed out initializing the D3D12 encoder worker", E_FAIL);
+    if (InterlockedCompareExchange(&session->d3d12WorkerInitialized, 0, 0) <= 0)
+        return false;
+    return true;
+}
+
+static bool ConsumePendingD3D12Frame(EncoderSession* session)
+{
+    if (session == nullptr || !session->d3d12FramePending)
+        return true;
+
+    // Do not enter the NVIDIA D3D11 driver while Unity's submission callback
+    // is still unwinding. Completion here proves the direct-queue copy and
+    // signal have executed, not merely that Signal() accepted the command.
+    if (!WaitForSharedFence(session, session->pendingD3D12FenceValue))
+        return false;
+
+    session->d3d11Context4->CopyResource(
+        session->d3d11CopyTexture, session->d3d11SharedTexture);
+    session->d3d11Context4->End(session->d3d11CompletionQuery);
+    HRESULT result = S_OK;
+    const UINT64 releaseFenceValue = session->d3d12ReleaseFenceValue + 1;
+    session->d3d11Context4->Flush();
+    if (!WaitForD3D11Completion(session))
+        return false;
+
+    // Only the shared-to-local copy is flushed here, before the local NV12
+    // sample is handed to Media Foundation. This avoids re-entering the same
+    // immediate context after SinkWriter has accepted the sample.
+    result = session->d3d12ReleaseFence->Signal(releaseFenceValue);
+    if (FAILED(result))
+        return session->Fail("Could not release the capture texture to D3D12", result);
+
+    const bool written = WriteGpuFrame(
+        session->d3d12Delegate, session->d3d11CopyTexture,
+        session->pendingPresentationSeconds);
+    session->d3d11Context4->Flush();
+    if (!written)
+        return false;
+
+    session->lastSampleTime = session->d3d12Delegate->lastSampleTime;
+    session->d3d12ReleaseFenceValue = releaseFenceValue;
+    session->d3d12FramePending = false;
+    return true;
+}
+
+static DWORD WINAPI D3D12EncoderWorker(void* context)
+{
+    auto* session = static_cast<EncoderSession*>(context);
+    if (session == nullptr)
+        return 1;
+    const HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool uninitializeCom = SUCCEEDED(comResult);
+    if (FAILED(comResult) && comResult != RPC_E_CHANGED_MODE)
+        session->Fail("Could not initialize the D3D12 encoder worker COM apartment", comResult);
+
+    const bool initialized =
+        (SUCCEEDED(comResult) || comResult == RPC_E_CHANGED_MODE) &&
+        InitializeD3D11EncoderWorker(session);
+    InterlockedExchange(&session->d3d12WorkerInitialized, initialized ? 1 : -1);
+    SetEvent(session->d3d12WorkerReadyEvent);
+    SetEvent(session->d3d12WorkerIdleEvent);
+
+    while (initialized &&
+        InterlockedCompareExchange(&session->d3d12WorkerStop, 0, 0) == 0)
+    {
+        const DWORD waitResult = WaitForSingleObject(session->d3d12WorkerWakeEvent, INFINITE);
+        if (waitResult != WAIT_OBJECT_0 ||
+            InterlockedCompareExchange(&session->d3d12WorkerStop, 0, 0) != 0)
+            break;
+        if (InterlockedExchange(&session->d3d12WorkerFinalizeRequested, 0) != 0)
+        {
+            bool finalized = false;
+            EncoderSession* delegate = session->d3d12Delegate;
+            if (delegate != nullptr && delegate->ready && !delegate->finalized &&
+                delegate->lastSampleTime >= 0)
+            {
+                const HRESULT result = delegate->writer->Finalize();
+                delegate->finalized = true;
+                delegate->ready = false;
+                finalized = SUCCEEDED(result);
+                if (!finalized)
+                    delegate->Fail("Could not finalize the MP4 file", result);
+            }
+            else if (delegate != nullptr && delegate->lastSampleTime < 0)
+            {
+                delegate->lastError = "No captured video frame was written.";
+            }
+            InterlockedExchange(
+                &session->d3d12WorkerFinalizeResult, finalized ? 1 : -1);
+        }
+        else
+        {
+            ConsumePendingD3D12Frame(session);
+        }
+        InterlockedExchange(&session->d3d12WorkerBusy, 0);
+        SetEvent(session->d3d12WorkerIdleEvent);
+    }
+
+    delete session->d3d12Delegate;
+    session->d3d12Delegate = nullptr;
+    SafeRelease(session->d3d11CompletionQuery);
+    SafeRelease(session->d3d11Context4);
+    SafeRelease(session->d3d11SharedTexture);
+    SafeRelease(session->d3d11CopyTexture);
+
+    if (uninitializeCom)
+        CoUninitialize();
+    return 0;
+}
+
+static bool WriteD3D12Frame(EncoderSession* session, void* nativeTexture, double presentationSeconds)
+{
+    if (session == nullptr || nativeTexture == nullptr || session->finalized)
+        return false;
+
+    auto* source = static_cast<ID3D12Resource*>(nativeTexture);
+    if (session->d3d12Delegate == nullptr && !InitializeD3D12Interop(session, source))
+        return false;
+
+    // Never block Unity's submission thread on the separate D3D11 device. If
+    // the worker is still consuming the previous shared texture, this capture
+    // frame is dropped and the game render queue continues uninterrupted.
+    if (InterlockedCompareExchange(&session->d3d12WorkerBusy, 0, 0) != 0)
+        return true;
+    if (g_unityD3D12 == nullptr || g_unityD3D12->GetCommandQueue == nullptr)
+        return session->Fail("Unity did not provide D3D12 graphics-queue access", E_NOINTERFACE);
+    ID3D12CommandQueue* graphicsQueue = g_unityD3D12->GetCommandQueue();
+    if (graphicsQueue == nullptr)
+        return session->Fail("Unity did not provide a D3D12 graphics queue", E_POINTER);
+
+    D3D12_RESOURCE_STATES sourceState = D3D12_RESOURCE_STATE_COMMON;
+    if (g_unityD3D12Legacy != nullptr && g_unityD3D12Legacy->GetResourceState != nullptr)
+        g_unityD3D12Legacy->GetResourceState(source, &sourceState);
+
+    HRESULT result = session->d3d12CommandAllocator->Reset();
+    if (SUCCEEDED(result))
+        result = session->d3d12CommandList->Reset(session->d3d12CommandAllocator, nullptr);
+    if (SUCCEEDED(result) && sourceState != D3D12_RESOURCE_STATE_COPY_SOURCE)
+    {
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = source;
+        barrier.Transition.StateBefore = sourceState;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        session->d3d12CommandList->ResourceBarrier(1, &barrier);
+    }
+    if (SUCCEEDED(result))
+    {
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = session->d3d12SharedTexture;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        session->d3d12CommandList->ResourceBarrier(1, &barrier);
+        session->d3d12CommandList->CopyResource(session->d3d12SharedTexture, source);
+
+        D3D12_RESOURCE_BARRIER barriers[2] = {};
+        barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barriers[0].Transition.pResource = session->d3d12SharedTexture;
+        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+        barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barriers[1].Transition.pResource = source;
+        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barriers[1].Transition.StateAfter = sourceState;
+        barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        session->d3d12CommandList->ResourceBarrier(
+            sourceState == D3D12_RESOURCE_STATE_COPY_SOURCE ? 1 : 2, barriers);
+        result = session->d3d12CommandList->Close();
+    }
+    if (FAILED(result))
+        return session->Fail("Could not record the D3D12 capture copy", result);
+
+    // The event is configured with graphicsQueueAccess=Allow, FlushCommandBuffers
+    // and SyncWorkerThreads, so this callback runs on Unity's submission thread
+    // after earlier rendering work. Queueing directly here avoids a circular
+    // dependency on Unity's end-of-frame fence.
+    if (session->d3d12ReleaseFenceValue != 0)
+    {
+        result = graphicsQueue->Wait(
+            session->d3d12ReleaseFence, session->d3d12ReleaseFenceValue);
+        if (FAILED(result))
+            return session->Fail("Could not reacquire the capture texture on D3D12", result);
+    }
+    ID3D12CommandList* commandLists[] = { session->d3d12CommandList };
+    graphicsQueue->ExecuteCommandLists(ARRAYSIZE(commandLists), commandLists);
+    const UINT64 d3d12CopyFenceValue = ++session->sharedFenceValue;
+    result = graphicsQueue->Signal(session->sharedFence, d3d12CopyFenceValue);
+    if (FAILED(result))
+        return session->Fail("Could not synchronize the D3D12 capture copy", result);
+    if (g_unityD3D12Legacy != nullptr && g_unityD3D12Legacy->SetResourceState != nullptr)
+        g_unityD3D12Legacy->SetResourceState(source, sourceState);
+
+    session->pendingPresentationSeconds = presentationSeconds;
+    session->pendingD3D12FenceValue = d3d12CopyFenceValue;
+    session->d3d12FramePending = true;
+    ResetEvent(session->d3d12WorkerIdleEvent);
+    InterlockedExchange(&session->d3d12WorkerBusy, 1);
+    if (!SetEvent(session->d3d12WorkerWakeEvent))
+    {
+        session->d3d12FramePending = false;
+        InterlockedExchange(&session->d3d12WorkerBusy, 0);
+        SetEvent(session->d3d12WorkerIdleEvent);
+        return session->Fail("Could not wake the D3D12 encoder worker", HRESULT_FROM_WIN32(GetLastError()));
+    }
+    return true;
+}
+
 extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_Create(
     const char* outputPath,
     int width,
@@ -585,14 +1192,34 @@ extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_GpuCreat
         static_cast<ID3D11Texture2D*>(nativeTexture));
 }
 
-static void MacacaBeaconWindowsVideo_RenderEvent(int eventId, void* data)
+extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_GpuCreateD3D12(
+    const char* outputPath,
+    int width,
+    int height,
+    int framesPerSecond,
+    int bitrate)
 {
-    if (eventId != 1)
+    return CreateD3D12PendingSession(outputPath, width, height, framesPerSecond, bitrate);
+}
+
+extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_GpuGetRenderEventId()
+{
+    return g_renderEventId;
+}
+
+static void UNITY_INTERFACE_API MacacaBeaconWindowsVideo_RenderEvent(int eventId, void* data)
+{
+    if (eventId != g_renderEventId)
         return;
     GpuSubmit* submit = static_cast<GpuSubmit*>(data);
     EncoderSession* session = submit == nullptr ? nullptr : submit->session;
     if (session != nullptr)
-        WriteGpuFrame(session, submit->nativeTexture, submit->presentationSeconds);
+    {
+        if (session->d3d12Input)
+            WriteD3D12Frame(session, submit->nativeTexture, submit->presentationSeconds);
+        else
+            WriteGpuFrame(session, submit->nativeTexture, submit->presentationSeconds);
+    }
     if (session != nullptr)
         InterlockedDecrement(&session->pendingGpuEvents);
     delete submit;
@@ -600,7 +1227,11 @@ static void MacacaBeaconWindowsVideo_RenderEvent(int eventId, void* data)
 
 extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_GpuIsAvailable()
 {
-    return 1;
+    if (g_unityGraphics == nullptr)
+        return 1;
+    if (g_unityGraphics->GetRenderer() == kUnityGfxRendererD3D11)
+        return 1;
+    return g_unityGraphics->GetRenderer() == kUnityGfxRendererD3D12 && g_unityD3D12 != nullptr ? 1 : 0;
 }
 
 extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_GpuGetRenderEventFunc()
@@ -614,7 +1245,9 @@ extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_GpuAlloc
     double presentationSeconds)
 {
     EncoderSession* session = static_cast<EncoderSession*>(pointer);
-    if (session == nullptr || nativeTexture == nullptr || !session->ready || session->finalized)
+    if (session == nullptr || nativeTexture == nullptr ||
+        ((!session->d3d12Input && !session->ready) ||
+         (session->d3d12Input && session->outputPath.empty())) || session->finalized)
         return nullptr;
     GpuSubmit* submit = new (std::nothrow) GpuSubmit();
     if (submit == nullptr)
@@ -676,11 +1309,57 @@ extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_AddRgba(
 
 extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_Finish(void* pointer)
 {
-    EncoderSession* session = static_cast<EncoderSession*>(pointer);
-    if (session == nullptr || !session->ready || session->finalized)
+    EncoderSession* request = static_cast<EncoderSession*>(pointer);
+    if (request == nullptr || request->finalized)
         return 0;
-    while (InterlockedCompareExchange(&session->pendingGpuEvents, 0, 0) != 0)
+    while (InterlockedCompareExchange(&request->pendingGpuEvents, 0, 0) != 0)
         Sleep(0);
+    EncoderSession* session = request;
+    if (request->d3d12Input)
+    {
+        if (request->d3d12WorkerIdleEvent == nullptr ||
+            WaitForSingleObject(request->d3d12WorkerIdleEvent, 30000) != WAIT_OBJECT_0)
+        {
+            request->lastError = "Timed out waiting for the D3D12 encoder worker.";
+            return 0;
+        }
+        session = request->d3d12Delegate;
+        if (session == nullptr)
+        {
+            if (request->lastError.empty())
+                request->lastError = "The D3D12 video session did not receive a frame.";
+            return 0;
+        }
+        if (!session->ready || session->finalized || session->lastSampleTime < 0)
+        {
+            if (session->lastError.empty())
+                session->lastError = "No captured video frame was written.";
+            return 0;
+        }
+
+        ResetEvent(request->d3d12WorkerIdleEvent);
+        InterlockedExchange(&request->d3d12WorkerFinalizeResult, 0);
+        InterlockedExchange(&request->d3d12WorkerFinalizeRequested, 1);
+        InterlockedExchange(&request->d3d12WorkerBusy, 1);
+        if (!SetEvent(request->d3d12WorkerWakeEvent) ||
+            WaitForSingleObject(request->d3d12WorkerIdleEvent, 30000) != WAIT_OBJECT_0)
+        {
+            request->lastError = "Timed out finalizing the D3D12 encoder worker.";
+            return 0;
+        }
+        if (InterlockedCompareExchange(&request->d3d12WorkerFinalizeResult, 0, 0) != 1)
+            return 0;
+        request->lastSampleTime = session->lastSampleTime;
+        request->finalized = true;
+        request->ready = false;
+        return 1;
+    }
+    if (!session->ready || session->finalized)
+    {
+        if (request->lastError.empty())
+            request->lastError = session->lastError;
+        return 0;
+    }
     if (session->lastSampleTime < 0)
     {
         if (session->lastError.empty())
@@ -696,12 +1375,20 @@ extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_Finish(voi
         session->Fail("Could not finalize the MP4 file", result);
         return 0;
     }
+    if (request != session)
+    {
+        request->finalized = true;
+        request->ready = false;
+    }
     return 1;
 }
 
 extern "C" __declspec(dllexport) const char* __cdecl MacacaBeaconWindowsVideo_LastError(void* pointer)
 {
     EncoderSession* session = static_cast<EncoderSession*>(pointer);
+    if (session != nullptr && session->d3d12Input && session->d3d12Delegate != nullptr &&
+        !session->d3d12Delegate->lastError.empty())
+        return session->d3d12Delegate->lastError.c_str();
     if (session == nullptr || session->lastError.empty())
         return nullptr;
     return session->lastError.c_str();
