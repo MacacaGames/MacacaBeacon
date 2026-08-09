@@ -65,10 +65,64 @@ namespace MacacaGames.RuntimeBugReporter
 #endif
         }
 
+        // Must only be called from a background worker after IsAvailable has
+        // already been checked on Unity's main thread. NativeGpuCreate does
+        // not access Unity graphics state; calling IsAvailable here would read
+        // SystemInfo from a non-main thread and can crash IL2CPP on iOS.
+        public static IntPtr CreateSessionOnBackgroundThread(string outputPath, int width, int height, int framesPerSecond, int bitrateKbps)
+        {
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
+            try
+            {
+                return NativeGpuCreate(outputPath, width, height, framesPerSecond, Math.Max(128, bitrateKbps) * 1000);
+            }
+            catch (DllNotFoundException) { return IntPtr.Zero; }
+            catch (EntryPointNotFoundException) { return IntPtr.Zero; }
+            catch (BadImageFormatException) { return IntPtr.Zero; }
+#else
+            return IntPtr.Zero;
+#endif
+        }
+
         public static bool FinishSession(IntPtr session)
         {
 #if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
             return session != IntPtr.Zero && NativeFinish(session) != 0;
+#else
+            return false;
+#endif
+        }
+
+        public static bool BeginFinishSession(IntPtr session)
+        {
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
+            if (session == IntPtr.Zero)
+                return false;
+            try
+            {
+                return NativeBeginFinish(session) != 0;
+            }
+            catch (DllNotFoundException) { return false; }
+            catch (EntryPointNotFoundException) { return false; }
+            catch (BadImageFormatException) { return false; }
+#else
+            return false;
+#endif
+        }
+
+        public static bool IsFinishDone(IntPtr session)
+        {
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
+            return session != IntPtr.Zero && NativeIsFinishDone(session) != 0;
+#else
+            return false;
+#endif
+        }
+
+        public static bool FinishSucceeded(IntPtr session)
+        {
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
+            return session != IntPtr.Zero && NativeFinishSucceeded(session) != 0;
 #else
             return false;
 #endif
@@ -160,6 +214,27 @@ namespace MacacaGames.RuntimeBugReporter
         [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_Finish")]
 #endif
         private static extern int NativeFinish(IntPtr session);
+
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_BeginFinish")]
+#else
+        [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_BeginFinish")]
+#endif
+        private static extern int NativeBeginFinish(IntPtr session);
+
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_IsFinishDone")]
+#else
+        [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_IsFinishDone")]
+#endif
+        private static extern int NativeIsFinishDone(IntPtr session);
+
+#if UNITY_IOS
+        [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_FinishSucceeded")]
+#else
+        [DllImport("MacacaBeaconVideo", EntryPoint = "MacacaBeaconVideo_FinishSucceeded")]
+#endif
+        private static extern int NativeFinishSucceeded(IntPtr session);
 
 #if UNITY_IOS
         [DllImport("__Internal", EntryPoint = "MacacaBeaconVideo_LastError")]

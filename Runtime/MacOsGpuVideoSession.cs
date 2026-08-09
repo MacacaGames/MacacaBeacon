@@ -1,4 +1,6 @@
 using System;
+using System.Collections;
+using System.Threading.Tasks;
 using UnityEngine;
 
 namespace MacacaGames.RuntimeBugReporter
@@ -22,6 +24,35 @@ namespace MacacaGames.RuntimeBugReporter
             return nativeSession == IntPtr.Zero ? null : new MacOsGpuVideoSession(nativeSession, outputPath);
         }
 
+        public static IEnumerator TryCreateAsync(
+            string outputPath,
+            int width,
+            int height,
+            int framesPerSecond,
+            int bitrateKbps,
+            Action<MacOsGpuVideoSession> completed)
+        {
+            var task = Task.Run(() =>
+            {
+                var nativeSession = MacOsGpuVideoBridge.CreateSessionOnBackgroundThread(
+                    outputPath, width, height, framesPerSecond, bitrateKbps);
+                return nativeSession == IntPtr.Zero
+                    ? null
+                    : new MacOsGpuVideoSession(nativeSession, outputPath);
+            });
+            while (!task.IsCompleted)
+                yield return null;
+
+            if (task.IsFaulted)
+            {
+                Debug.LogException(task.Exception);
+                completed?.Invoke(null);
+                yield break;
+            }
+
+            completed?.Invoke(task.Result);
+        }
+
         public bool Submit(GpuFrameCapture.GpuFrame frame, double presentationSeconds)
         {
             return IsOpen && MacOsGpuVideoBridge.Submit(nativeSession, frame, presentationSeconds);
@@ -35,6 +66,32 @@ namespace MacacaGames.RuntimeBugReporter
             if (!finished)
                 Debug.LogWarning("[Macaca Beacon] GPU MP4 finalization failed: " + MacOsGpuVideoBridge.GetLastError(nativeSession));
             return finished;
+        }
+
+        public IEnumerator FinishAsync(Action<bool> completed)
+        {
+            if (!IsOpen)
+            {
+                completed?.Invoke(false);
+                yield break;
+            }
+
+            // Keep older macOS bundles usable until their native plugin is rebuilt
+            // with the async exports. iOS always compiles the current source into
+            // the generated Xcode project.
+            if (!MacOsGpuVideoBridge.BeginFinishSession(nativeSession))
+            {
+                completed?.Invoke(Finish());
+                yield break;
+            }
+
+            while (!MacOsGpuVideoBridge.IsFinishDone(nativeSession))
+                yield return null;
+
+            var finished = MacOsGpuVideoBridge.FinishSucceeded(nativeSession);
+            if (!finished)
+                Debug.LogWarning("[Macaca Beacon] GPU MP4 background finalization failed: " + MacOsGpuVideoBridge.GetLastError(nativeSession));
+            completed?.Invoke(finished);
         }
 
         public void Dispose()

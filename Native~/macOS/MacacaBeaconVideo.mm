@@ -9,6 +9,7 @@
 #import <Metal/Metal.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <string>
 
@@ -26,6 +27,9 @@ struct MacacaBeaconVideoSession
     dispatch_group_t pendingGpuEvents = nil;
     dispatch_group_t pendingGpuFrames = nil;
     dispatch_queue_t gpuEncodeQueue = nil;
+    std::atomic<bool> finishStarted{false};
+    std::atomic<bool> finishDone{false};
+    std::atomic<bool> finishSucceeded{false};
 };
 
 struct MacacaBeaconGpuSubmit
@@ -538,6 +542,55 @@ extern "C" __attribute__((visibility("default"))) int MacacaBeaconVideo_Finish(v
         }
         return 1;
     }
+}
+
+extern "C" __attribute__((visibility("default"))) int MacacaBeaconVideo_BeginFinish(void* handle)
+{
+    auto* session = static_cast<MacacaBeaconVideoSession*>(handle);
+    if (session == nullptr || !session->ready)
+        return 0;
+
+    bool expected = false;
+    if (!session->finishStarted.compare_exchange_strong(expected, true))
+        return 1;
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        // The GPU completion callback queues the final pixel-buffer append on
+        // gpuEncodeQueue. Waiting here keeps the Unity/render thread free while
+        // still guaranteeing that AVAssetWriter sees every submitted frame.
+        dispatch_group_wait(session->pendingGpuEvents, DISPATCH_TIME_FOREVER);
+        dispatch_group_wait(session->pendingGpuFrames, DISPATCH_TIME_FOREVER);
+
+        bool succeeded = false;
+        if (session->appendedFrames > 0)
+        {
+            [session->input markAsFinished];
+            dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+            [session->writer finishWritingWithCompletionHandler:^{
+                dispatch_semaphore_signal(semaphore);
+            }];
+            dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+            succeeded = session->writer.status == AVAssetWriterStatusCompleted;
+            if (!succeeded)
+                SetWriterError(session, @"AVAssetWriter did not complete the MP4 file.");
+        }
+
+        session->finishSucceeded.store(succeeded);
+        session->finishDone.store(true);
+    });
+    return 1;
+}
+
+extern "C" __attribute__((visibility("default"))) int MacacaBeaconVideo_IsFinishDone(void* handle)
+{
+    auto* session = static_cast<MacacaBeaconVideoSession*>(handle);
+    return session != nullptr && session->finishDone.load() ? 1 : 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int MacacaBeaconVideo_FinishSucceeded(void* handle)
+{
+    auto* session = static_cast<MacacaBeaconVideoSession*>(handle);
+    return session != nullptr && session->finishSucceeded.load() ? 1 : 0;
 }
 
 extern "C" __attribute__((visibility("default"))) const char* MacacaBeaconVideo_LastError(void* handle)

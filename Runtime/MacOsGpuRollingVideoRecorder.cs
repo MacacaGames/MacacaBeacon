@@ -16,9 +16,19 @@ namespace MacacaGames.RuntimeBugReporter
             public double End;
         }
 
+        private sealed class PendingSegment
+        {
+            public MacOsGpuVideoSession Session;
+            public string Path;
+            public double Start;
+            public double End;
+            public bool CleanupWhenDone;
+        }
+
         private readonly MonoBehaviour host;
         private readonly BugReporterSettings settings;
         private readonly List<Segment> segments = new List<Segment>();
+        private readonly List<PendingSegment> pendingSegments = new List<PendingSegment>();
         private GpuFrameCapture capture;
         private MacOsGpuVideoSession session;
         private Coroutine coroutine;
@@ -103,7 +113,9 @@ namespace MacacaGames.RuntimeBugReporter
                 {
                     width = frame.Width;
                     height = frame.Height;
-                    BeginSegment(now);
+                    yield return BeginSegmentAsync(now);
+                    if (session == null)
+                        continue;
                 }
 
                 if (!session.Submit(frame, now - segmentStart))
@@ -124,7 +136,7 @@ namespace MacacaGames.RuntimeBugReporter
             }
         }
 
-        private void BeginSegment(double start)
+        private IEnumerator BeginSegmentAsync(double start)
         {
             if (string.IsNullOrEmpty(directory))
             {
@@ -134,23 +146,52 @@ namespace MacacaGames.RuntimeBugReporter
 
             segmentStart = start;
             var path = Path.Combine(directory, "segment-" + Guid.NewGuid().ToString("N") + ".mp4");
-            session = MacOsGpuVideoSession.TryCreate(path, width, height, settings.videoFramesPerSecond, settings.videoBitrateKbps);
+            var created = default(MacOsGpuVideoSession);
+            yield return MacOsGpuVideoSession.TryCreateAsync(
+                path,
+                width,
+                height,
+                settings.videoFramesPerSecond,
+                settings.videoBitrateKbps,
+                value => created = value);
+            session = created;
             if (session == null)
-                throw new InvalidOperationException("Could not create the macOS GPU video session.");
+            {
+                TryDelete(path);
+                Debug.LogWarning("[Macaca Beacon] Could not create the Apple GPU video session.");
+            }
         }
 
         private void FinishSegment(double end)
         {
             if (session == null)
                 return;
-            var path = session.OutputPath;
-            var finished = session.Finish();
-            session.Dispose();
+            var pending = new PendingSegment
+            {
+                Session = session,
+                Path = session.OutputPath,
+                Start = segmentStart,
+                End = end
+            };
             session = null;
-            if (finished && File.Exists(path))
-                segments.Add(new Segment { Path = path, Start = segmentStart, End = end });
+            pendingSegments.Add(pending);
+            host.StartCoroutine(FinalizeSegmentAsync(pending));
+        }
+
+        private IEnumerator FinalizeSegmentAsync(PendingSegment pending)
+        {
+            var finished = false;
+            yield return pending.Session.FinishAsync(value => finished = value);
+            pending.Session.Dispose();
+            pendingSegments.Remove(pending);
+
+            if (finished && File.Exists(pending.Path))
+                segments.Add(new Segment { Path = pending.Path, Start = pending.Start, End = pending.End });
             else
-                TryDelete(path);
+                TryDelete(pending.Path);
+
+            if (pending.CleanupWhenDone && pendingSegments.Count == 0)
+                CleanupSegments();
         }
 
         private IEnumerator FinalizeIncident()
@@ -160,6 +201,9 @@ namespace MacacaGames.RuntimeBugReporter
             incidentPending = false;
             FinishSegment(Time.realtimeSinceStartupAsDouble);
             IsEncoding = true;
+
+            while (pendingSegments.Count > 0)
+                yield return null;
 
             var selected = new List<string>();
             var startTime = incidentTime - Math.Max(0, settings.secondsBefore);
@@ -234,8 +278,26 @@ namespace MacacaGames.RuntimeBugReporter
                 host.StopCoroutine(coroutine);
                 coroutine = null;
             }
-            FinishSegment(Time.realtimeSinceStartupAsDouble);
-            CleanupSegments();
+            for (var index = 0; index < pendingSegments.Count; index++)
+                pendingSegments[index].CleanupWhenDone = true;
+            if (session != null)
+            {
+                var pending = new PendingSegment
+                {
+                    Session = session,
+                    Path = session.OutputPath,
+                    Start = segmentStart,
+                    End = Time.realtimeSinceStartupAsDouble,
+                    CleanupWhenDone = true
+                };
+                session = null;
+                pendingSegments.Add(pending);
+                host.StartCoroutine(FinalizeSegmentAsync(pending));
+            }
+            else if (pendingSegments.Count == 0)
+            {
+                CleanupSegments();
+            }
             capture?.Dispose();
             capture = null;
         }
