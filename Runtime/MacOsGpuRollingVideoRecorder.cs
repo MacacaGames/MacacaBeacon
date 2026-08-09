@@ -84,8 +84,7 @@ namespace MacacaGames.RuntimeBugReporter
             incidentEndTime = incidentTime + settings.secondsAfter;
             incidentCompleted = completed;
             IsFinalizing = true;
-            if (settings.secondsAfter <= 0)
-                host.StartCoroutine(FinalizeIncident());
+            host.StartCoroutine(FinalizeAfterWindow());
         }
 
         private IEnumerator CaptureLoop()
@@ -103,6 +102,15 @@ namespace MacacaGames.RuntimeBugReporter
 
                 GpuFrameCapture.GpuFrame frame = default(GpuFrameCapture.GpuFrame);
                 yield return capture.Capture(settings.videoWidth, value => frame = value);
+                // Do not require a valid frame or an active segment to decide
+                // that the post-incident window is complete. Segment creation
+                // is asynchronous and must never be able to hold the report UI
+                // in Recording forever.
+                if (incidentPending && Time.realtimeSinceStartupAsDouble >= incidentEndTime)
+                {
+                    yield return FinalizeIncident();
+                    yield break;
+                }
                 if (!frame.IsValid)
                 {
                     Debug.LogWarning("[Macaca Beacon] GPU capture returned an invalid RenderTexture.");
@@ -131,8 +139,6 @@ namespace MacacaGames.RuntimeBugReporter
                     PruneSegments(now - Math.Max(1, settings.secondsBefore) - 2.0);
                 }
 
-                if (incidentPending && now >= incidentEndTime)
-                    yield return FinalizeIncident();
             }
         }
 
@@ -154,6 +160,15 @@ namespace MacacaGames.RuntimeBugReporter
                 settings.videoFramesPerSecond,
                 settings.videoBitrateKbps,
                 value => created = value);
+            // Keep a session that was already being created when the incident
+            // was marked; it contains the after-window frames we still need.
+            // Only discard a late result after FinalizeIncident has claimed the
+            // incident and detached the active recording state.
+            if (IsFinalizing && !incidentPending)
+            {
+                created?.Dispose();
+                created = null;
+            }
             session = created;
             if (session == null)
             {
@@ -244,6 +259,14 @@ namespace MacacaGames.RuntimeBugReporter
             CleanupSegments();
             if (!requestedEnabled)
                 Stop();
+        }
+
+        private IEnumerator FinalizeAfterWindow()
+        {
+            while (incidentPending && Time.realtimeSinceStartupAsDouble < incidentEndTime)
+                yield return null;
+            if (incidentPending)
+                yield return FinalizeIncident();
         }
 
         private void PruneSegments(double cutoff)

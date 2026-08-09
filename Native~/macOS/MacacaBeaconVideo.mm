@@ -181,6 +181,16 @@ extern "C" __attribute__((visibility("default"))) void* MacacaBeaconVideo_GpuCre
     return CreateSession(outputPath, width, height, framesPerSecond, bitrate, true);
 }
 
+extern "C" __attribute__((visibility("default"))) void* MacacaBeaconVideo_GpuCreateNoTransform(
+    const char* outputPath,
+    int width,
+    int height,
+    int framesPerSecond,
+    int bitrate)
+{
+    return CreateSession(outputPath, width, height, framesPerSecond, bitrate, false);
+}
+
 static BOOL AppendMetalPixelBuffer(MacacaBeaconVideoSession* session, CVPixelBufferRef pixelBuffer, double presentationSeconds)
 {
     for (int attempt = 0; attempt < 500 && !session->input.readyForMoreMediaData; ++attempt)
@@ -558,8 +568,15 @@ extern "C" __attribute__((visibility("default"))) int MacacaBeaconVideo_BeginFin
         // The GPU completion callback queues the final pixel-buffer append on
         // gpuEncodeQueue. Waiting here keeps the Unity/render thread free while
         // still guaranteeing that AVAssetWriter sees every submitted frame.
-        dispatch_group_wait(session->pendingGpuEvents, DISPATCH_TIME_FOREVER);
-        dispatch_group_wait(session->pendingGpuFrames, DISPATCH_TIME_FOREVER);
+        const dispatch_time_t finishDeadline = dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC);
+        if (dispatch_group_wait(session->pendingGpuEvents, finishDeadline) != 0 ||
+            dispatch_group_wait(session->pendingGpuFrames, finishDeadline) != 0)
+        {
+            SetError(session, @"Timed out waiting for pending Metal video frames.");
+            session->finishSucceeded.store(false);
+            session->finishDone.store(true);
+            return;
+        }
 
         bool succeeded = false;
         if (session->appendedFrames > 0)

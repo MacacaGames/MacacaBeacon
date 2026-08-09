@@ -7,6 +7,8 @@ namespace MacacaGames.RuntimeBugReporter
 {
     internal sealed class MacOsGpuVideoSession : IDisposable
     {
+        private const double CreateTimeoutSeconds = 10.0;
+        private const double FinishTimeoutSeconds = 35.0;
         private IntPtr nativeSession;
 
         public bool IsOpen => nativeSession != IntPtr.Zero;
@@ -32,6 +34,15 @@ namespace MacacaGames.RuntimeBugReporter
             int bitrateKbps,
             Action<MacOsGpuVideoSession> completed)
         {
+#if UNITY_EDITOR_OSX
+            // AVAssetWriter session creation through the macOS bundle returns
+            // null when the P/Invoke originates from a Task.Run worker in the
+            // Unity Editor. Keep Editor creation on Unity's main thread. The
+            // iOS player still uses the background path below, preserving its
+            // asynchronous segment rollover.
+            completed?.Invoke(TryCreate(outputPath, width, height, framesPerSecond, bitrateKbps));
+            yield break;
+#else
             var task = Task.Run(() =>
             {
                 var nativeSession = MacOsGpuVideoBridge.CreateSessionOnBackgroundThread(
@@ -40,8 +51,17 @@ namespace MacacaGames.RuntimeBugReporter
                     ? null
                     : new MacOsGpuVideoSession(nativeSession, outputPath);
             });
+            var startedAt = Time.realtimeSinceStartupAsDouble;
             while (!task.IsCompleted)
+            {
+                if (Time.realtimeSinceStartupAsDouble - startedAt > CreateTimeoutSeconds)
+                {
+                    Debug.LogWarning("[Macaca Beacon] GPU MP4 session creation timed out; skipping this segment.");
+                    completed?.Invoke(null);
+                    yield break;
+                }
                 yield return null;
+            }
 
             if (task.IsFaulted)
             {
@@ -51,6 +71,7 @@ namespace MacacaGames.RuntimeBugReporter
             }
 
             completed?.Invoke(task.Result);
+#endif
         }
 
         public bool Submit(GpuFrameCapture.GpuFrame frame, double presentationSeconds)
@@ -85,8 +106,19 @@ namespace MacacaGames.RuntimeBugReporter
                 yield break;
             }
 
+            var startedAt = Time.realtimeSinceStartupAsDouble;
             while (!MacOsGpuVideoBridge.IsFinishDone(nativeSession))
+            {
+                if (Time.realtimeSinceStartupAsDouble - startedAt > FinishTimeoutSeconds)
+                {
+                    Debug.LogWarning("[Macaca Beacon] GPU MP4 finalization timed out; continuing without this segment.");
+                    // Do not dispose the native session here: the native worker
+                    // may still be draining Metal/AVAssetWriter callbacks.
+                    completed?.Invoke(false);
+                    yield break;
+                }
                 yield return null;
+            }
 
             var finished = MacOsGpuVideoBridge.FinishSucceeded(nativeSession);
             if (!finished)
