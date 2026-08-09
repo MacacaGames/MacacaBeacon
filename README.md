@@ -157,7 +157,7 @@ git submodule update --init --recursive
 
 ```bash
 git -C Packages/com.macacagames.beacon fetch --tags origin
-git -C Packages/com.macacagames.beacon checkout v0.3.0
+git -C Packages/com.macacagames.beacon checkout v0.5.0
 git add Packages/com.macacagames.beacon
 git commit -m "Update Macaca Beacon"
 ```
@@ -169,8 +169,10 @@ git commit -m "Update Macaca Beacon"
 將 `com.macacagames.beacon` 保持在獨立 Git repository 後，其他 Unity 專案也可在 `Packages/manifest.json` 加入：
 
 ```json
-"com.macacagames.beacon": "https://github.com/your-org/macaca-beacon.git?path=/com.macacagames.beacon#v0.1.0"
+"com.macacagames.beacon": "https://github.com/MacacaGames/MacacaBeacon.git#v0.5.0"
 ```
+
+`v0.5.0` 是目前的穩定版本 tag。更新到其他版本時，將 URL 最後的 tag 替換成指定版本，例如 `#v0.4.0`。由於 package 位於 repository 根目錄，Git URL 不需要 `path` 參數。
 
 套件 managed runtime assembly 沒有第三方相依；需要 Unity 的 IMGUI、UnityWebRequest、ScreenCapture 與 ImageConversion built-in modules。macOS／iOS MP4 backend 使用系統內建的 AVFoundation、VideoToolbox、CoreMedia、CoreVideo 與 Metal frameworks；Windows MP4 backend 使用系統內建的 Media Foundation 與 COM；Android MP4 backend 使用系統內建的 MediaCodec 與 MediaMuxer。ImageIO、WIC 與 Bitmap APIs 僅保留給 JPEG compatibility fallback。
 
