@@ -331,7 +331,8 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.Label("Capture the moment. Signal the issue.", subtitleStyle);
             GUILayout.EndVertical();
             GUILayout.FlexibleSpace();
-            GUILayout.Label(settings.shortcut + "  toggle", hintStyle, GUILayout.Width(88 * styleScale));
+            if (!IsMobileLayout())
+                GUILayout.Label(settings.shortcut + "  toggle", hintStyle, GUILayout.Width(88 * styleScale));
             GUI.enabled = !isSending;
             if (GUILayout.Button("CLOSE", closeButtonStyle, GUILayout.Width(82 * styleScale), GUILayout.Height(44 * styleScale)))
                 Close();
@@ -340,30 +341,23 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.EndHorizontal();
             GUILayout.Space(18 * styleScale);
 
+            var contentTop = 94f * styleScale;
+            var footerHeight = 86f * styleScale;
+            var contentHeight = Mathf.Max(220f, windowRect.height - contentTop - footerHeight);
+            GUILayout.BeginArea(new Rect(0f, contentTop, windowRect.width, contentHeight));
             if (CanUseDesktopLayout())
             {
-                // The left card contains a preview, annotation controls,
-                // summary, and privacy copy. Let this whole content area
-                // scroll so the footer remains fixed and always reachable.
-                contentScroll = GUILayout.BeginScrollView(contentScroll, false, true, GUILayout.ExpandHeight(true));
                 DrawDesktopContent();
-                GUILayout.EndScrollView();
             }
             else
                 DrawCompactContent();
+            GUILayout.EndArea();
 
-            GUILayout.Space(16 * styleScale);
+            GUILayout.BeginArea(new Rect(0f, windowRect.height - footerHeight, windowRect.width, footerHeight));
             GUILayout.BeginHorizontal();
-            GUILayout.Space(28 * styleScale);
-            GUI.enabled = !isSending;
-            if (GUILayout.Button("CANCEL", buttonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(IsMobileLayout() ? 104 * styleScale : 120 * styleScale))) Close();
-            GUI.enabled = true;
-            GUILayout.FlexibleSpace();
-            if (!IsMobileLayout())
-                GUILayout.Label("Ctrl / Cmd + Enter", hintStyle, GUILayout.Width(142 * styleScale));
+            var footerPadding = IsMobileLayout() ? 12f * styleScale : 28f * styleScale;
             var videoPending = settings.enableRollingVideo && videoRecorder.IsFinalizing;
             var canSend = !isSending && !videoPending;
-            GUI.enabled = canSend;
             var sendLabel = isSending
                 ? "SENDING…"
                 : videoRecorder.IsEncoding
@@ -371,12 +365,32 @@ namespace MacacaGames.RuntimeBugReporter
                     : videoPending
                         ? "RECORDING VIDEO…"
                         : "SEND TO SLACK";
-            if (GUILayout.Button(sendLabel, primaryButtonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(IsMobileLayout() ? 164 * styleScale : 190 * styleScale)))
-                TryBeginSend();
+            GUILayout.Space(footerPadding);
+            GUI.enabled = !isSending;
+            if (IsMobileLayout())
+            {
+                var mobileButtonWidth = (windowRect.width - footerPadding * 2f - 8f * styleScale) * 0.5f;
+                if (GUILayout.Button("CANCEL", buttonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(mobileButtonWidth)))
+                    Close();
+                GUI.enabled = canSend;
+                if (GUILayout.Button(sendLabel, primaryButtonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(mobileButtonWidth)))
+                    TryBeginSend();
+            }
+            else
+            {
+                if (GUILayout.Button("CANCEL", buttonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(120 * styleScale)))
+                    Close();
+                GUI.enabled = true;
+                GUILayout.FlexibleSpace();
+                GUILayout.Label("Ctrl / Cmd + Enter", hintStyle, GUILayout.Width(142 * styleScale));
+                GUI.enabled = canSend;
+                if (GUILayout.Button(sendLabel, primaryButtonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(190 * styleScale)))
+                    TryBeginSend();
+            }
             GUI.enabled = true;
-            GUILayout.Space(28 * styleScale);
+            GUILayout.Space(footerPadding);
             GUILayout.EndHorizontal();
-            GUILayout.Space(22 * styleScale);
+            GUILayout.EndArea();
             GUILayout.EndVertical();
         }
 
@@ -384,10 +398,11 @@ namespace MacacaGames.RuntimeBugReporter
         {
             var availableWidth = windowRect.width - 56f * styleScale;
             var leftWidth = availableWidth * 0.52f;
+            var contentHeight = GetContentHeight();
             GUILayout.BeginHorizontal(GUILayout.ExpandHeight(true));
             GUILayout.Space(28 * styleScale);
             GUILayout.BeginVertical(cardStyle, GUILayout.Width(leftWidth), GUILayout.ExpandHeight(true));
-            DrawScreenshotPanel(Mathf.Clamp(windowRect.height * 0.36f, 300f, 480f));
+            DrawScreenshotPanel(Mathf.Clamp(contentHeight * 0.36f, 220f, 480f));
             GUILayout.Space(16 * styleScale);
             DrawCaptureSummary();
             GUILayout.FlexibleSpace();
@@ -424,6 +439,11 @@ namespace MacacaGames.RuntimeBugReporter
                 return settings.interfaceScale * mobileScale;
             }
             return Mathf.Clamp(viewportScale, 0.9f, 1.25f) * settings.interfaceScale;
+        }
+
+        private float GetContentHeight()
+        {
+            return Mathf.Max(220f, windowRect.height - 94f * styleScale - 86f * styleScale);
         }
 
         private Rect GetSafeAreaGuiRect()
