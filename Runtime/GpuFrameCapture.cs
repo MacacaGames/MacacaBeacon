@@ -94,7 +94,9 @@ namespace MacacaGames.RuntimeBugReporter
 
         private static RenderTexture CreateCaptureTexture(int textureWidth, int textureHeight)
         {
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
+#if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
+            return new RenderTexture(textureWidth, textureHeight, 0, RenderTextureFormat.BGRA32, RenderTextureReadWrite.Linear);
+#elif UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
             // CVPixelBuffer and the Metal encoder bridge both consume BGRA bytes.
             // Make the native Metal texture layout explicit instead of relying on
             // the platform-dependent native mapping of RenderTextureFormat.ARGB32.

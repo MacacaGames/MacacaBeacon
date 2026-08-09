@@ -1,4 +1,5 @@
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <windows.h>
 #include <mfapi.h>
 #include <mferror.h>
@@ -30,10 +31,7 @@
 
 namespace
 {
-    // Some MinGW-w64 SDK revisions do not declare this Windows 8+ attribute even
-    // though the operating system supports it. Value from the Windows SDK mfidl.h.
-    const GUID MacacaMpeg4SinkMoovBeforeMdat =
-        { 0xf672e3ac, 0xe1e6, 0x4f10, { 0xb5, 0xec, 0x5f, 0x3b, 0x30, 0x82, 0x88, 0x16 } };
+    std::string g_availabilityError;
 
     template <typename T>
     void SafeRelease(T*& pointer)
@@ -63,31 +61,12 @@ namespace
 
     std::string HResultMessage(const char* operation, HRESULT result)
     {
-        char* systemMessage = nullptr;
-        const DWORD length = FormatMessageA(
-            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-            nullptr,
-            static_cast<DWORD>(result),
-            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-            reinterpret_cast<char*>(&systemMessage),
-            0,
-            nullptr);
-
         std::string message(operation == nullptr ? "Media Foundation operation failed" : operation);
         message += " (HRESULT 0x";
         char code[16] = {};
         sprintf_s(code, "%08lX", static_cast<unsigned long>(result));
         message += code;
         message += ")";
-        if (length > 0 && systemMessage != nullptr)
-        {
-            message += ": ";
-            message.append(systemMessage, length);
-            while (!message.empty() && (message.back() == '\r' || message.back() == '\n'))
-                message.pop_back();
-        }
-        if (systemMessage != nullptr)
-            LocalFree(systemMessage);
         return message;
     }
 
@@ -95,6 +74,13 @@ namespace
     {
         IMFSinkWriter* writer = nullptr;
         IWICImagingFactory* imagingFactory = nullptr;
+        IMFDXGIDeviceManager* deviceManager = nullptr;
+        IMFVideoSampleAllocatorEx* videoSampleAllocator = nullptr;
+        ID3D11Device* d3dDevice = nullptr;
+        ID3D11VideoDevice* videoDevice = nullptr;
+        ID3D11VideoContext* videoContext = nullptr;
+        ID3D11VideoProcessorEnumerator* videoEnumerator = nullptr;
+        ID3D11VideoProcessor* videoProcessor = nullptr;
         DWORD streamIndex = 0;
         int width = 0;
         int height = 0;
@@ -104,14 +90,22 @@ namespace
         bool mediaFoundationStarted = false;
         bool uninitializeCom = false;
         bool ready = false;
-    bool finalized = false;
-    volatile LONG pendingGpuEvents = 0;
-    std::string lastError;
+        bool finalized = false;
+        bool gpuInput = false;
+        volatile LONG pendingGpuEvents = 0;
+        std::string lastError;
 
         ~EncoderSession()
         {
             SafeRelease(writer);
             SafeRelease(imagingFactory);
+            SafeRelease(videoSampleAllocator);
+            SafeRelease(deviceManager);
+            SafeRelease(videoProcessor);
+            SafeRelease(videoEnumerator);
+            SafeRelease(videoContext);
+            SafeRelease(videoDevice);
+            SafeRelease(d3dDevice);
             if (mediaFoundationStarted)
                 MFShutdown();
             if (uninitializeCom)
@@ -151,17 +145,31 @@ namespace
     bool ConfigureInput(EncoderSession* session)
     {
         IMFMediaType* inputType = nullptr;
+        IMFAttributes* allocatorAttributes = nullptr;
         HRESULT result = MFCreateMediaType(&inputType);
         if (SUCCEEDED(result)) result = inputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        if (SUCCEEDED(result)) result = inputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+        if (SUCCEEDED(result)) result = inputType->SetGUID(MF_MT_SUBTYPE, session->gpuInput ? MFVideoFormat_NV12 : MFVideoFormat_RGB32);
         if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_DEFAULT_STRIDE, static_cast<UINT32>(session->width * 4));
+        if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_DEFAULT_STRIDE, static_cast<UINT32>(session->gpuInput ? session->width : session->width * 4));
         if (SUCCEEDED(result)) result = MFSetAttributeSize(inputType, MF_MT_FRAME_SIZE, session->width, session->height);
         if (SUCCEEDED(result)) result = MFSetAttributeRatio(inputType, MF_MT_FRAME_RATE, session->framesPerSecond, 1);
         if (SUCCEEDED(result)) result = MFSetAttributeRatio(inputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
         if (SUCCEEDED(result)) result = session->writer->SetInputMediaType(session->streamIndex, inputType, nullptr);
+        if (SUCCEEDED(result) && session->gpuInput)
+            result = MFCreateVideoSampleAllocatorEx(IID_PPV_ARGS(&session->videoSampleAllocator));
+        if (SUCCEEDED(result) && session->gpuInput)
+            result = session->videoSampleAllocator->SetDirectXManager(session->deviceManager);
+        if (SUCCEEDED(result) && session->gpuInput)
+            result = MFCreateAttributes(&allocatorAttributes, 2);
+        if (SUCCEEDED(result) && session->gpuInput)
+            result = allocatorAttributes->SetUINT32(MF_SA_D3D11_USAGE, D3D11_USAGE_DEFAULT);
+        if (SUCCEEDED(result) && session->gpuInput)
+            result = allocatorAttributes->SetUINT32(MF_SA_D3D11_BINDFLAGS, D3D11_BIND_RENDER_TARGET);
+        if (SUCCEEDED(result) && session->gpuInput)
+            result = session->videoSampleAllocator->InitializeSampleAllocatorEx(2, 4, allocatorAttributes, inputType);
+        SafeRelease(allocatorAttributes);
         SafeRelease(inputType);
-        return SUCCEEDED(result) || session->Fail("Could not configure the RGB input stream", result);
+        return SUCCEEDED(result) || session->Fail("Could not configure the video input stream", result);
     }
 
     bool DecodeJpeg(EncoderSession* session, const uint8_t* bytes, int byteCount, std::vector<uint8_t>& pixels)
@@ -254,9 +262,21 @@ namespace
         LONGLONG sampleTime = static_cast<LONGLONG>(std::llround(std::max(0.0, presentationSeconds) * 10000000.0));
         if (sampleTime <= session->lastSampleTime)
             sampleTime = session->lastSampleTime + 1;
-        if (SUCCEEDED(result)) result = sample->SetSampleTime(sampleTime);
-        if (SUCCEEDED(result)) result = sample->SetSampleDuration(session->frameDuration);
-        if (SUCCEEDED(result)) result = session->writer->WriteSample(session->streamIndex, sample);
+        result = sample->SetSampleTime(sampleTime);
+        if (FAILED(result))
+        {
+            SafeRelease(sample);
+            SafeRelease(mediaBuffer);
+            return session->Fail("Could not set the captured sample timestamp", result);
+        }
+        result = sample->SetSampleDuration(session->frameDuration);
+        if (FAILED(result))
+        {
+            SafeRelease(sample);
+            SafeRelease(mediaBuffer);
+            return session->Fail("Could not set the captured sample duration", result);
+        }
+        result = session->writer->WriteSample(session->streamIndex, sample);
         if (SUCCEEDED(result)) session->lastSampleTime = sampleTime;
 
         if (destination != nullptr)
@@ -270,24 +290,111 @@ namespace
     {
         if (session == nullptr || nativeTexture == nullptr || !session->ready || session->finalized)
             return false;
+        if (!session->gpuInput || session->d3dDevice == nullptr || session->videoDevice == nullptr ||
+            session->videoContext == nullptr || session->videoEnumerator == nullptr ||
+            session->videoProcessor == nullptr || session->videoSampleAllocator == nullptr)
+            return session->Fail("The D3D11 video encoder session is not ready", E_UNEXPECTED);
 
         ID3D11Texture2D* texture = static_cast<ID3D11Texture2D*>(nativeTexture);
         D3D11_TEXTURE2D_DESC description = {};
         texture->GetDesc(&description);
         if (description.Width != static_cast<UINT>(session->width) ||
             description.Height != static_cast<UINT>(session->height) ||
-            description.Format != DXGI_FORMAT_B8G8R8A8_UNORM)
+            (description.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+             description.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB &&
+             description.Format != DXGI_FORMAT_B8G8R8A8_TYPELESS))
         {
-            session->lastError = "The D3D11 capture texture must be BGRA8 and match the encoder dimensions.";
+            char details[192] = {};
+            sprintf_s(details, "D3D11 capture texture mismatch: format=%u, size=%ux%u, expected BGRA8 %dx%d.",
+                static_cast<unsigned>(description.Format), description.Width, description.Height,
+                session->width, session->height);
+            session->lastError = details;
             return false;
         }
 
-        IMFMediaBuffer* mediaBuffer = nullptr;
+        ID3D11Texture2D* concreteTexture = nullptr;
         IMFSample* sample = nullptr;
-        HRESULT result = MFCreateDXGISurfaceBuffer(
-            __uuidof(ID3D11Texture2D), texture, 0, FALSE, &mediaBuffer);
-        if (SUCCEEDED(result)) result = MFCreateSample(&sample);
-        if (SUCCEEDED(result)) result = sample->AddBuffer(mediaBuffer);
+        IMFMediaBuffer* mediaBuffer = nullptr;
+        IMFDXGIBuffer* dxgiBuffer = nullptr;
+        ID3D11Texture2D* nv12Texture = nullptr;
+        ID3D11VideoProcessorInputView* inputView = nullptr;
+        ID3D11VideoProcessorOutputView* outputView = nullptr;
+        ID3D11Texture2D* processorInput = texture;
+        HRESULT result = S_OK;
+        if (description.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS)
+        {
+            D3D11_TEXTURE2D_DESC concreteDescription = description;
+            concreteDescription.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            concreteDescription.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            concreteDescription.CPUAccessFlags = 0;
+            concreteDescription.Usage = D3D11_USAGE_DEFAULT;
+            concreteDescription.MiscFlags = 0;
+            result = session->d3dDevice->CreateTexture2D(&concreteDescription, nullptr, &concreteTexture);
+            if (FAILED(result))
+                return session->Fail("Could not create a concrete BGRA8 encoder texture", result);
+
+            ID3D11DeviceContext* context = nullptr;
+            session->d3dDevice->GetImmediateContext(&context);
+            if (context == nullptr)
+            {
+                SafeRelease(concreteTexture);
+                return session->Fail("Could not acquire the D3D11 immediate context", E_POINTER);
+            }
+            context->CopyResource(concreteTexture, texture);
+            context->Flush();
+            SafeRelease(context);
+            processorInput = concreteTexture;
+        }
+
+        if (SUCCEEDED(result)) result = session->videoSampleAllocator->AllocateSample(&sample);
+        if (SUCCEEDED(result)) result = sample->GetBufferByIndex(0, &mediaBuffer);
+        if (SUCCEEDED(result))
+            result = mediaBuffer->SetCurrentLength(
+                static_cast<DWORD>(session->width * session->height * 3 / 2));
+        if (SUCCEEDED(result)) result = mediaBuffer->QueryInterface(IID_PPV_ARGS(&dxgiBuffer));
+        if (SUCCEEDED(result)) result = dxgiBuffer->GetResource(IID_PPV_ARGS(&nv12Texture));
+
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputViewDescription = {};
+        inputViewDescription.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+        inputViewDescription.Texture2D.MipSlice = 0;
+        inputViewDescription.Texture2D.ArraySlice = 0;
+        if (SUCCEEDED(result))
+            result = session->videoDevice->CreateVideoProcessorInputView(
+                processorInput, session->videoEnumerator, &inputViewDescription, &inputView);
+
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputViewDescription = {};
+        outputViewDescription.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+        outputViewDescription.Texture2D.MipSlice = 0;
+        if (SUCCEEDED(result))
+            result = session->videoDevice->CreateVideoProcessorOutputView(
+                nv12Texture, session->videoEnumerator, &outputViewDescription, &outputView);
+
+        RECT frameRect = { 0, 0, session->width, session->height };
+        if (SUCCEEDED(result))
+        {
+            session->videoContext->VideoProcessorSetStreamFrameFormat(
+                session->videoProcessor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+            session->videoContext->VideoProcessorSetStreamSourceRect(session->videoProcessor, 0, TRUE, &frameRect);
+            session->videoContext->VideoProcessorSetStreamDestRect(session->videoProcessor, 0, TRUE, &frameRect);
+            session->videoContext->VideoProcessorSetOutputTargetRect(session->videoProcessor, TRUE, &frameRect);
+            D3D11_VIDEO_PROCESSOR_STREAM stream = {};
+            stream.Enable = TRUE;
+            stream.pInputSurface = inputView;
+            result = session->videoContext->VideoProcessorBlt(session->videoProcessor, outputView, 0, 1, &stream);
+        }
+
+        SafeRelease(outputView);
+        SafeRelease(inputView);
+        SafeRelease(concreteTexture);
+
+        if (FAILED(result))
+        {
+            SafeRelease(nv12Texture);
+            SafeRelease(dxgiBuffer);
+            SafeRelease(mediaBuffer);
+            SafeRelease(sample);
+            return session->Fail("Could not convert the D3D11 capture texture to NV12", result);
+        }
 
         LONGLONG sampleTime = static_cast<LONGLONG>(std::llround(std::max(0.0, presentationSeconds) * 10000000.0));
         if (sampleTime <= session->lastSampleTime)
@@ -297,33 +404,47 @@ namespace
         if (SUCCEEDED(result)) result = session->writer->WriteSample(session->streamIndex, sample);
         if (SUCCEEDED(result)) session->lastSampleTime = sampleTime;
 
-        SafeRelease(sample);
+        SafeRelease(nv12Texture);
+        SafeRelease(dxgiBuffer);
         SafeRelease(mediaBuffer);
+        SafeRelease(sample);
         return SUCCEEDED(result) || session->Fail("Media Foundation rejected a D3D11 texture frame", result);
     }
 }
 
 extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_IsAvailable()
 {
+    g_availabilityError.clear();
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool uninitializeCom = SUCCEEDED(comResult);
     if (FAILED(comResult) && comResult != RPC_E_CHANGED_MODE)
+    {
+        g_availabilityError = HResultMessage("Could not initialize COM", comResult);
         return 0;
+    }
 
     const HRESULT mediaFoundationResult = MFStartup(MF_VERSION, MFSTARTUP_FULL);
     if (SUCCEEDED(mediaFoundationResult))
         MFShutdown();
     if (uninitializeCom)
         CoUninitialize();
+    if (FAILED(mediaFoundationResult))
+        g_availabilityError = HResultMessage("Could not start Media Foundation", mediaFoundationResult);
     return SUCCEEDED(mediaFoundationResult) ? 1 : 0;
 }
 
-extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_Create(
+extern "C" __declspec(dllexport) const char* __cdecl MacacaBeaconWindowsVideo_AvailabilityError()
+{
+    return g_availabilityError.empty() ? nullptr : g_availabilityError.c_str();
+}
+
+static EncoderSession* CreateEncoderSession(
     const char* outputPath,
     int width,
     int height,
     int framesPerSecond,
-    int bitrate)
+    int bitrate,
+    ID3D11Texture2D* gpuTexture)
 {
     EncoderSession* session = new (std::nothrow) EncoderSession();
     if (session == nullptr)
@@ -373,12 +494,51 @@ extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_Create(
     DeleteFileW(widePath.c_str());
 
     IMFAttributes* attributes = nullptr;
-    result = MFCreateAttributes(&attributes, 3);
+    result = MFCreateAttributes(&attributes, 4);
     if (SUCCEEDED(result)) result = attributes->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
     if (SUCCEEDED(result)) result = attributes->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
-    // Put MP4 metadata before media bytes so Slack and browsers can inspect/preview the
-    // attachment without first scanning the complete upload (fast-start layout).
-    if (SUCCEEDED(result)) result = attributes->SetUINT32(MacacaMpeg4SinkMoovBeforeMdat, TRUE);
+    if (SUCCEEDED(result) && gpuTexture != nullptr)
+    {
+        session->gpuInput = true;
+        gpuTexture->GetDevice(&session->d3dDevice);
+        if (session->d3dDevice == nullptr)
+            result = E_POINTER;
+        ID3D11DeviceContext* immediateContext = nullptr;
+        if (SUCCEEDED(result))
+            session->d3dDevice->GetImmediateContext(&immediateContext);
+        if (SUCCEEDED(result) && immediateContext == nullptr)
+            result = E_POINTER;
+        if (SUCCEEDED(result))
+            result = session->d3dDevice->QueryInterface(IID_PPV_ARGS(&session->videoDevice));
+        if (SUCCEEDED(result))
+            result = immediateContext->QueryInterface(IID_PPV_ARGS(&session->videoContext));
+        SafeRelease(immediateContext);
+
+        D3D11_VIDEO_PROCESSOR_CONTENT_DESC contentDescription = {};
+        contentDescription.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+        contentDescription.InputFrameRate.Numerator = static_cast<UINT>(session->framesPerSecond);
+        contentDescription.InputFrameRate.Denominator = 1;
+        contentDescription.InputWidth = static_cast<UINT>(session->width);
+        contentDescription.InputHeight = static_cast<UINT>(session->height);
+        contentDescription.OutputFrameRate = contentDescription.InputFrameRate;
+        contentDescription.OutputWidth = contentDescription.InputWidth;
+        contentDescription.OutputHeight = contentDescription.InputHeight;
+        contentDescription.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+        if (SUCCEEDED(result))
+            result = session->videoDevice->CreateVideoProcessorEnumerator(
+                &contentDescription, &session->videoEnumerator);
+        if (SUCCEEDED(result))
+            result = session->videoDevice->CreateVideoProcessor(
+                session->videoEnumerator, 0, &session->videoProcessor);
+
+        UINT resetToken = 0;
+        if (SUCCEEDED(result))
+            result = MFCreateDXGIDeviceManager(&resetToken, &session->deviceManager);
+        if (SUCCEEDED(result))
+            result = session->deviceManager->ResetDevice(session->d3dDevice, resetToken);
+        if (SUCCEEDED(result))
+            result = attributes->SetUnknown(MF_SINK_WRITER_D3D_MANAGER, session->deviceManager);
+    }
     if (SUCCEEDED(result)) result = MFCreateSinkWriterFromURL(widePath.c_str(), nullptr, attributes, &session->writer);
     SafeRelease(attributes);
     if (FAILED(result))
@@ -401,6 +561,28 @@ extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_Create(
 
     session->ready = true;
     return session;
+}
+
+extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_Create(
+    const char* outputPath,
+    int width,
+    int height,
+    int framesPerSecond,
+    int bitrate)
+{
+    return CreateEncoderSession(outputPath, width, height, framesPerSecond, bitrate, nullptr);
+}
+
+extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_GpuCreate(
+    const char* outputPath,
+    int width,
+    int height,
+    int framesPerSecond,
+    int bitrate,
+    void* nativeTexture)
+{
+    return CreateEncoderSession(outputPath, width, height, framesPerSecond, bitrate,
+        static_cast<ID3D11Texture2D*>(nativeTexture));
 }
 
 static void MacacaBeaconWindowsVideo_RenderEvent(int eventId, void* data)
@@ -501,7 +683,8 @@ extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_Finish(voi
         Sleep(0);
     if (session->lastSampleTime < 0)
     {
-        session->lastError = "No captured video frame was written.";
+        if (session->lastError.empty())
+            session->lastError = "No captured video frame was written.";
         return 0;
     }
 
@@ -527,4 +710,108 @@ extern "C" __declspec(dllexport) const char* __cdecl MacacaBeaconWindowsVideo_La
 extern "C" __declspec(dllexport) void __cdecl MacacaBeaconWindowsVideo_Destroy(void* pointer)
 {
     delete static_cast<EncoderSession*>(pointer);
+}
+
+extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_ConcatSegments(
+    const char* outputPath,
+    const char** inputPaths,
+    int inputCount)
+{
+    if (outputPath == nullptr || inputPaths == nullptr || inputCount <= 0)
+        return 0;
+
+    const HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool uninitializeCom = SUCCEEDED(comResult);
+    if (FAILED(comResult) && comResult != RPC_E_CHANGED_MODE)
+        return 0;
+
+    HRESULT result = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+    if (FAILED(result))
+    {
+        if (uninitializeCom)
+            CoUninitialize();
+        return 0;
+    }
+
+    IMFSinkWriter* writer = nullptr;
+    IMFSourceReader* firstReader = nullptr;
+    IMFMediaType* compressedType = nullptr;
+    DWORD outputStream = 0;
+    const std::wstring wideOutput = Utf8ToWide(outputPath);
+    const std::wstring firstInput = Utf8ToWide(inputPaths[0]);
+    DeleteFileW(wideOutput.c_str());
+
+    result = MFCreateSourceReaderFromURL(firstInput.c_str(), nullptr, &firstReader);
+    if (SUCCEEDED(result))
+        result = firstReader->GetNativeMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, &compressedType);
+    if (SUCCEEDED(result))
+        result = MFCreateSinkWriterFromURL(wideOutput.c_str(), nullptr, nullptr, &writer);
+    if (SUCCEEDED(result))
+        result = writer->AddStream(compressedType, &outputStream);
+    if (SUCCEEDED(result))
+        result = writer->SetInputMediaType(outputStream, compressedType, nullptr);
+    if (SUCCEEDED(result))
+        result = writer->BeginWriting();
+
+    LONGLONG outputTime = 0;
+    for (int pathIndex = 0; SUCCEEDED(result) && pathIndex < inputCount; ++pathIndex)
+    {
+        IMFSourceReader* reader = nullptr;
+        if (pathIndex == 0)
+        {
+            reader = firstReader;
+            firstReader = nullptr;
+        }
+        else
+        {
+            const std::wstring input = Utf8ToWide(inputPaths[pathIndex]);
+            result = MFCreateSourceReaderFromURL(input.c_str(), nullptr, &reader);
+        }
+
+        LONGLONG sourceStart = -1;
+        LONGLONG segmentEnd = outputTime;
+        while (SUCCEEDED(result) && reader != nullptr)
+        {
+            DWORD flags = 0;
+            LONGLONG timestamp = 0;
+            IMFSample* sample = nullptr;
+            result = reader->ReadSample(
+                static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),
+                0,
+                nullptr,
+                &flags,
+                &timestamp,
+                &sample);
+            if (FAILED(result) || (flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0)
+            {
+                SafeRelease(sample);
+                break;
+            }
+            if (sample == nullptr)
+                continue;
+
+            if (sourceStart < 0)
+                sourceStart = timestamp;
+            LONGLONG duration = 0;
+            if (FAILED(sample->GetSampleDuration(&duration)) || duration <= 0)
+                duration = 1;
+            const LONGLONG adjustedTime = outputTime + std::max<LONGLONG>(0, timestamp - sourceStart);
+            sample->SetSampleTime(adjustedTime);
+            result = writer->WriteSample(outputStream, sample);
+            segmentEnd = std::max(segmentEnd, adjustedTime + duration);
+            SafeRelease(sample);
+        }
+        outputTime = segmentEnd;
+        SafeRelease(reader);
+    }
+
+    if (SUCCEEDED(result))
+        result = writer->Finalize();
+    SafeRelease(compressedType);
+    SafeRelease(firstReader);
+    SafeRelease(writer);
+    MFShutdown();
+    if (uninitializeCom)
+        CoUninitialize();
+    return SUCCEEDED(result) ? 1 : 0;
 }
