@@ -37,6 +37,9 @@ namespace MacacaGames.RuntimeBugReporter
         private string pendingFocusControl;
         private Vector2 formScroll;
         private Vector2 contentScroll;
+        private int touchScrollId = -1;
+        private int touchScrollTarget;
+        private Vector2 lastTouchScrollPosition;
         private Rect windowRect;
         private CursorLockMode previousCursorLock;
         private bool previousCursorVisible;
@@ -307,6 +310,7 @@ namespace MacacaGames.RuntimeBugReporter
                 if (safeRight < Screen.width)
                     GUI.DrawTexture(new Rect(safeRight, safeTop, Screen.width - safeRight, windowRect.height), windowTexture);
             }
+            HandleScrollInput();
             GUI.color = Color.white;
             windowRect = GUILayout.Window(GetInstanceID(), windowRect, DrawWindow, GUIContent.none, GUIStyle.none, GUILayout.Width(width), GUILayout.Height(height));
 
@@ -397,16 +401,22 @@ namespace MacacaGames.RuntimeBugReporter
         private void DrawDesktopContent()
         {
             var availableWidth = windowRect.width - 56f * styleScale;
-            var leftWidth = availableWidth * 0.52f;
+            // Keep the capture tools useful while giving the form more room
+            // for titles, descriptions, and category controls.
+            var leftWidth = availableWidth * 0.44f;
             var contentHeight = GetContentHeight();
             GUILayout.BeginHorizontal(GUILayout.ExpandHeight(true));
             GUILayout.Space(28 * styleScale);
             GUILayout.BeginVertical(cardStyle, GUILayout.Width(leftWidth), GUILayout.ExpandHeight(true));
-            DrawScreenshotPanel(Mathf.Clamp(contentHeight * 0.36f, 220f, 480f));
+            contentScroll = GUILayout.BeginScrollView(contentScroll, false, true, GUILayout.ExpandHeight(true));
+            var previewWidth = Mathf.Max(100f,
+                leftWidth - cardStyle.padding.left - cardStyle.padding.right - 24f * styleScale);
+            DrawScreenshotPanel(previewWidth, Mathf.Clamp(contentHeight * 0.36f, 220f, 480f));
             GUILayout.Space(16 * styleScale);
             DrawCaptureSummary();
             GUILayout.FlexibleSpace();
             GUILayout.Label(settings.privacyNotice, hintStyle);
+            GUILayout.EndScrollView();
             GUILayout.EndVertical();
             GUILayout.Space(18 * styleScale);
             GUILayout.BeginVertical(cardStyle, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
@@ -420,7 +430,12 @@ namespace MacacaGames.RuntimeBugReporter
 
         private bool CanUseDesktopLayout()
         {
-            return windowRect.width >= DesktopLayoutMinimumWidth && windowRect.height >= 720f;
+            // A large interface scale consumes the same physical space as a
+            // smaller window. Account for it before choosing two columns;
+            // otherwise common 1366x768 displays get clipped scroll views.
+            var scale = Mathf.Max(1f, styleScale);
+            return windowRect.width >= DesktopLayoutMinimumWidth * scale
+                && windowRect.height >= 720f * scale;
         }
 
         private bool IsMobileLayout()
@@ -458,13 +473,87 @@ namespace MacacaGames.RuntimeBugReporter
                 Mathf.Max(1f, safeArea.height - inset * 2f));
         }
 
+        private void HandleScrollInput()
+        {
+            var current = Event.current;
+            if (current.type == EventType.ScrollWheel)
+            {
+                var target = GetScrollTarget(current.mousePosition);
+                if (target == 1)
+                    contentScroll.y = Mathf.Max(0f, contentScroll.y + current.delta.y * 24f);
+                else if (target == 2)
+                    formScroll.y = Mathf.Max(0f, formScroll.y + current.delta.y * 24f);
+                current.Use();
+            }
+
+            // OnGUI is evaluated multiple times per frame. Process touch
+            // deltas once during Repaint so one swipe is not applied more
+            // than once by the layout and input passes.
+            if (current.type != EventType.Repaint)
+                return;
+
+            if (Input.touchCount == 0)
+            {
+                touchScrollId = -1;
+                return;
+            }
+
+            Touch touch = default(Touch);
+            for (var i = 0; i < Input.touchCount; i++)
+            {
+                var candidate = Input.GetTouch(i);
+                if (touchScrollId < 0 && candidate.phase == TouchPhase.Began)
+                {
+                    var point = new Vector2(candidate.position.x, Screen.height - candidate.position.y);
+                    if (windowRect.Contains(point))
+                    {
+                        touchScrollId = candidate.fingerId;
+                        touchScrollTarget = GetScrollTarget(point);
+                        lastTouchScrollPosition = point;
+                    }
+                }
+                if (candidate.fingerId == touchScrollId)
+                    touch = candidate;
+            }
+
+            if (touchScrollId < 0)
+                return;
+
+            var touchPoint = new Vector2(touch.position.x, Screen.height - touch.position.y);
+            if (touch.phase == TouchPhase.Moved || touch.phase == TouchPhase.Stationary)
+            {
+                var deltaY = touchPoint.y - lastTouchScrollPosition.y;
+                if (touchScrollTarget == 1)
+                    contentScroll.y = Mathf.Max(0f, contentScroll.y - deltaY);
+                else if (touchScrollTarget == 2)
+                    formScroll.y = Mathf.Max(0f, formScroll.y - deltaY);
+                lastTouchScrollPosition = touchPoint;
+            }
+            if (touch.phase == TouchPhase.Ended || touch.phase == TouchPhase.Canceled)
+                touchScrollId = -1;
+        }
+
+        private int GetScrollTarget(Vector2 point)
+        {
+            if (!windowRect.Contains(point))
+                return 0;
+            if (!CanUseDesktopLayout())
+                return 2;
+
+            var leftWidth = (windowRect.width - 56f * styleScale) * 0.44f;
+            var leftEdge = windowRect.x + 28f * styleScale;
+            return point.x < leftEdge + leftWidth ? 1 : 2;
+        }
+
         private void DrawCompactContent()
         {
             GUILayout.BeginHorizontal();
             GUILayout.Space(28 * styleScale);
             GUILayout.BeginVertical(cardStyle, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
             formScroll = GUILayout.BeginScrollView(formScroll, false, true, GUILayout.ExpandHeight(true));
-            DrawScreenshotPanel(Mathf.Clamp(windowRect.width * 0.58f, 200f, 460f));
+            var previewWidth = Mathf.Max(100f,
+                windowRect.width - 56f * styleScale - cardStyle.padding.left - cardStyle.padding.right - 24f * styleScale);
+            DrawScreenshotPanel(previewWidth, Mathf.Clamp(windowRect.width * 0.58f, 200f, 460f));
             GUILayout.Space(14 * styleScale);
             DrawCaptureSummary();
             GUILayout.Space(18 * styleScale);
@@ -477,7 +566,7 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.EndHorizontal();
         }
 
-        private void DrawScreenshotPanel(float maximumHeight)
+        private void DrawScreenshotPanel(float previewWidth, float fallbackHeight)
         {
             GUILayout.BeginHorizontal();
             DrawLabel("SCREENSHOT");
@@ -486,8 +575,26 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.Label(screenshotBytes != null ? "READY" : "UNAVAILABLE", statusStyle);
             GUILayout.EndHorizontal();
 
-            var previewHeight = Mathf.Max(160f * styleScale, maximumHeight);
-            var rect = GUILayoutUtility.GetRect(100f, previewHeight, GUILayout.ExpandWidth(true));
+            var previewHeight = fallbackHeight;
+            if (screenshotPreview != null && screenshotPreview.width > 0 && screenshotPreview.height > 0)
+            {
+                // Match the preview frame to the captured image so the dark
+                // texture does not create large letterboxed bands around it.
+                previewHeight = previewWidth * screenshotPreview.height / screenshotPreview.width;
+            }
+            previewHeight = Mathf.Max(160f * styleScale, previewHeight);
+            // Keep the preview frame at the captured image size. Expanding
+            // this rect to the whole card creates dark side bands around the
+            // screenshot even when its aspect ratio is already correct.
+            GUILayout.BeginHorizontal();
+            GUILayout.FlexibleSpace();
+            var rect = GUILayoutUtility.GetRect(
+                previewWidth,
+                previewHeight,
+                GUILayout.Width(previewWidth),
+                GUILayout.Height(previewHeight));
+            GUILayout.FlexibleSpace();
+            GUILayout.EndHorizontal();
             GUI.DrawTexture(rect, fieldTexture);
             if (screenshotPreview != null)
             {
