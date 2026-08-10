@@ -61,9 +61,11 @@ namespace MacacaGames.RuntimeBugReporter
         private Texture2D accentTexture;
         private Texture2D fieldTexture;
         private float styleScale = -1f;
-        private GUIStyle mobileEntryStyle;
+        private GUIStyle entryButtonStyle;
+#if UNITY_IOS || UNITY_ANDROID
         private float mobileGestureStartedAt = -1f;
         private bool mobileGestureTriggered;
+#endif
         private GameObject inputBlocker;
 
         // The two-column layout needs more room than its old 900 px cutoff
@@ -135,7 +137,7 @@ namespace MacacaGames.RuntimeBugReporter
                 status = "Encoding video in the background — you can keep typing.";
             }
 #if UNITY_IOS || UNITY_ANDROID
-            if (settings == null || IsOpen || isOpening || !settings.mobileThreeFingerGesture)
+            if (settings == null || IsOpen || isOpening || !settings.enableThreeFingerGesture)
             {
                 mobileGestureStartedAt = -1f;
                 mobileGestureTriggered = false;
@@ -151,7 +153,7 @@ namespace MacacaGames.RuntimeBugReporter
 
             if (mobileGestureStartedAt < 0f)
                 mobileGestureStartedAt = Time.unscaledTime;
-            if (!mobileGestureTriggered && Time.unscaledTime - mobileGestureStartedAt >= settings.mobileGestureHoldSeconds)
+            if (!mobileGestureTriggered && Time.unscaledTime - mobileGestureStartedAt >= settings.threeFingerGestureHoldSeconds)
             {
                 mobileGestureTriggered = true;
                 RequestOpen();
@@ -246,10 +248,8 @@ namespace MacacaGames.RuntimeBugReporter
                 if (IsOpen) Close(); else RequestOpen();
                 current.Use();
             }
-#if UNITY_IOS || UNITY_ANDROID
-            if (!IsOpen && !isOpening && settings.mobileEntryButton)
-                DrawMobileEntry();
-#endif
+            if (!IsOpen && !isOpening && settings.showEntryButton)
+                DrawEntryButton();
             if (!IsOpen)
                 return;
             if (settings.allowEscapeToClose && current.type == EventType.KeyDown && current.keyCode == KeyCode.Escape)
@@ -461,14 +461,34 @@ namespace MacacaGames.RuntimeBugReporter
             return Mathf.Max(220f, windowRect.height - 94f * styleScale - 86f * styleScale);
         }
 
+        internal static Rect ToGuiSafeArea(Rect safeArea, float screenHeight)
+        {
+            return new Rect(safeArea.x, screenHeight - safeArea.yMax, safeArea.width, safeArea.height);
+        }
+
+        internal static float SelectEntryButtonBaseSize(bool mobile, float desktopSize, float mobileSize)
+        {
+            return mobile ? mobileSize : desktopSize;
+        }
+
+        internal static Rect GetEntryButtonRect(Rect safeArea, float size, float margin, EntryButtonCorner corner)
+        {
+            var left = corner == EntryButtonCorner.TopLeft || corner == EntryButtonCorner.BottomLeft;
+            var top = corner == EntryButtonCorner.TopLeft || corner == EntryButtonCorner.TopRight;
+            return new Rect(
+                left ? safeArea.xMin + margin : safeArea.xMax - size - margin,
+                top ? safeArea.yMin + margin : safeArea.yMax - size - margin,
+                size,
+                size);
+        }
+
         private Rect GetSafeAreaGuiRect()
         {
-            var safeArea = Screen.safeArea;
-            var topLeftY = Screen.height - safeArea.yMax;
+            var safeArea = ToGuiSafeArea(Screen.safeArea, Screen.height);
             var inset = Screen.width <= MobileLayoutMaximumWidth ? 8f : 0f;
             return new Rect(
                 safeArea.xMin + inset,
-                topLeftY + inset,
+                safeArea.yMin + inset,
                 Mathf.Max(1f, safeArea.width - inset * 2f),
                 Mathf.Max(1f, safeArea.height - inset * 2f));
         }
@@ -1095,36 +1115,39 @@ namespace MacacaGames.RuntimeBugReporter
             validationStyle = new GUIStyle(hintStyle) { fontStyle = FontStyle.Bold };
             validationStyle.normal.textColor = new Color(0.70f, 0.23f, 0.20f);
 
-            mobileEntryStyle = CreateButtonStyle(scale, accent, accentHover, accentActive, new Color(0.17f, 0.15f, 0.13f));
-            mobileEntryStyle.fontSize = Mathf.RoundToInt(24 * scale);
-            mobileEntryStyle.margin = new RectOffset(0, 0, 0, 0);
-            mobileEntryStyle.padding = new RectOffset(0, 0, 0, 0);
+            entryButtonStyle = CreateButtonStyle(scale, accent, accentHover, accentActive, new Color(0.17f, 0.15f, 0.13f));
+            entryButtonStyle.fontSize = Mathf.RoundToInt((UsesMobileEntryLayout() ? 24 : 18) * scale);
+            entryButtonStyle.margin = new RectOffset(0, 0, 0, 0);
+            entryButtonStyle.padding = new RectOffset(0, 0, 0, 0);
         }
 
+        private static bool UsesMobileEntryLayout()
+        {
 #if UNITY_IOS || UNITY_ANDROID
-        private void DrawMobileEntry()
+            return true;
+#else
+            return Application.isMobilePlatform;
+#endif
+        }
+
+        private void DrawEntryButton()
         {
             EnsureStyles(Mathf.Clamp(Mathf.Min(Screen.width / 1280f, Screen.height / 900f), 0.9f, 1.25f) * settings.interfaceScale);
-            var safeArea = Screen.safeArea;
-            var size = Mathf.Clamp(settings.mobileEntrySize * styleScale, 48f, 112f);
+            var mobile = UsesMobileEntryLayout();
+            var baseSize = SelectEntryButtonBaseSize(mobile, settings.desktopEntryButtonSize, settings.mobileEntryButtonSize);
+            var size = Mathf.Clamp(baseSize * styleScale, mobile ? 48f : 32f, mobile ? 112f : 80f);
             var margin = Mathf.Max(10f, 14f * styleScale);
-            var x = settings.mobileEntryCorner == MobileEntryCorner.TopLeft || settings.mobileEntryCorner == MobileEntryCorner.BottomLeft
-                ? safeArea.xMin + margin
-                : safeArea.xMax - size - margin;
-            var y = settings.mobileEntryCorner == MobileEntryCorner.TopLeft || settings.mobileEntryCorner == MobileEntryCorner.TopRight
-                ? safeArea.yMin + margin
-                : safeArea.yMax - size - margin;
-            var rect = new Rect(x, y, size, size);
+            var rect = GetEntryButtonRect(ToGuiSafeArea(Screen.safeArea, Screen.height), size, margin, settings.entryButtonCorner);
 
-            GUI.color = new Color(1f, 1f, 1f, settings.mobileEntryOpacity);
-            if (GUI.Button(rect, "!", mobileEntryStyle))
+            var previousColor = GUI.color;
+            GUI.color = new Color(1f, 1f, 1f, settings.entryButtonOpacity);
+            if (GUI.Button(rect, "!", entryButtonStyle))
             {
                 RequestOpen();
                 Event.current.Use();
             }
-            GUI.color = Color.white;
+            GUI.color = previousColor;
         }
-#endif
 
         private GUIStyle CreateButtonStyle(float scale, Texture2D normal, Texture2D hover, Texture2D active, Color text)
         {

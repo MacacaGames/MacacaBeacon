@@ -24,7 +24,8 @@ namespace MacacaGames.RuntimeBugReporter
 #else
                 if (BugReporterController.Instance != null)
                     return BugReporterController.Instance.IsVideoRecordingEnabled;
-                return BugReporterSettings.LoadOrDefault().enableRollingVideo;
+                var settings = BugReporterSettings.LoadOrDefault();
+                return IsEnabled(settings) && settings.enableRollingVideo;
 #endif
             }
         }
@@ -34,8 +35,8 @@ namespace MacacaGames.RuntimeBugReporter
 #if MACACA_BEACON_PRODUCTION
             return;
 #else
-            EnsureController();
-            BugReporterController.Instance.RequestOpen();
+            if (EnsureController())
+                BugReporterController.Instance.RequestOpen();
 #endif
         }
 
@@ -54,8 +55,8 @@ namespace MacacaGames.RuntimeBugReporter
 #if MACACA_BEACON_PRODUCTION
             return;
 #else
-            EnsureController();
-            BugReporterController.Instance.SetVideoRecordingEnabled(enabled);
+            if (EnsureController())
+                BugReporterController.Instance.SetVideoRecordingEnabled(enabled);
 #endif
         }
 
@@ -91,21 +92,31 @@ namespace MacacaGames.RuntimeBugReporter
             return;
 #else
             var settings = BugReporterSettings.LoadOrDefault();
-            if (settings.enabledInBuild)
+            if (IsEnabled(settings))
                 EnsureController(settings);
 #endif
         }
 
-        private static void EnsureController(BugReporterSettings settings = null)
+        internal static bool IsEnabled(BugReporterSettings settings)
+        {
+            return settings != null && settings.enableBugReporter;
+        }
+
+        private static bool EnsureController(BugReporterSettings settings = null)
         {
             if (BugReporterController.Instance != null)
-                return;
+                return true;
+
+            settings = settings ?? BugReporterSettings.LoadOrDefault();
+            if (!IsEnabled(settings))
+                return false;
 
             var host = new GameObject("[Macaca Beacon]");
             host.hideFlags = HideFlags.HideInHierarchy;
             UnityEngine.Object.DontDestroyOnLoad(host);
             var controller = host.AddComponent<BugReporterController>();
-            controller.Initialize(settings ?? BugReporterSettings.LoadOrDefault());
+            controller.Initialize(settings);
+            return true;
         }
     }
 }

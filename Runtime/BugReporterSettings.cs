@@ -1,7 +1,18 @@
+using System;
 using UnityEngine;
+using UnityEngine.Serialization;
 
 namespace MacacaGames.RuntimeBugReporter
 {
+    public enum EntryButtonCorner
+    {
+        TopLeft,
+        TopRight,
+        BottomLeft,
+        BottomRight
+    }
+
+    [Obsolete("Use EntryButtonCorner instead.")]
     public enum MobileEntryCorner
     {
         TopLeft,
@@ -19,19 +30,20 @@ namespace MacacaGames.RuntimeBugReporter
         // Keep the asset type and runtime API available in Production, but do
         // not compile or serialize any project-specific Beacon configuration.
         // These properties are intentionally non-serialized shell values.
-        public bool enabledInBuild => false;
+        public bool enableBugReporter => false;
         public KeyCode shortcut => KeyCode.None;
         public bool allowEscapeToClose => false;
         public bool fullscreen => false;
         public float backdropOpacity => 0f;
         public float interfaceScale => 1f;
         public float desktopWidthRatio => 0.64f;
-        public bool mobileEntryButton => false;
-        public bool mobileThreeFingerGesture => false;
-        public float mobileEntrySize => 68f;
-        public float mobileEntryOpacity => 0f;
-        public float mobileGestureHoldSeconds => 0f;
-        public MobileEntryCorner mobileEntryCorner => MobileEntryCorner.TopRight;
+        public bool showEntryButton => false;
+        public float desktopEntryButtonSize => 44f;
+        public float mobileEntryButtonSize => 68f;
+        public float entryButtonOpacity => 0f;
+        public EntryButtonCorner entryButtonCorner => EntryButtonCorner.TopRight;
+        public bool enableThreeFingerGesture => false;
+        public float threeFingerGestureHoldSeconds => 0f;
         public string botToken => string.Empty;
         public string channelId => string.Empty;
         public bool includeScreenshot => false;
@@ -57,7 +69,8 @@ namespace MacacaGames.RuntimeBugReporter
         public string[] categories => new[] { "Other" };
 #else
         [Header("Activation")]
-        public bool enabledInBuild = true;
+        [FormerlySerializedAs("enabledInBuild")]
+        public bool enableBugReporter = true;
         public KeyCode shortcut = KeyCode.F6;
         public bool allowEscapeToClose = true;
 
@@ -68,15 +81,24 @@ namespace MacacaGames.RuntimeBugReporter
         [Range(0.8f, 1.5f)] public float interfaceScale = 1.25f;
         [Range(0.45f, 0.9f)] public float desktopWidthRatio = 0.64f;
 
-        [Header("Mobile entry")]
-        [Tooltip("Show a small edge button on iOS and Android. It only consumes touches inside its own rectangle.")]
-        public bool mobileEntryButton = false;
+        [Header("Entry Button")]
+        [Tooltip("Show a corner button that opens the reporter on desktop and mobile. It only consumes input inside its own rectangle.")]
+        [FormerlySerializedAs("mobileEntryButton")]
+        public bool showEntryButton = false;
+        [Range(32f, 80f)] public float desktopEntryButtonSize = 44f;
+        [FormerlySerializedAs("mobileEntrySize")]
+        [Range(48f, 112f)] public float mobileEntryButtonSize = 68f;
+        [FormerlySerializedAs("mobileEntryOpacity")]
+        [Range(0.15f, 1f)] public float entryButtonOpacity = 0.72f;
+        [FormerlySerializedAs("mobileEntryCorner")]
+        public EntryButtonCorner entryButtonCorner = EntryButtonCorner.TopRight;
+
+        [Header("Mobile Gesture")]
         [Tooltip("Open the reporter after holding three fingers on the screen. This gesture does not reserve a visible UI area.")]
-        public bool mobileThreeFingerGesture = true;
-        [Range(48f, 112f)] public float mobileEntrySize = 68f;
-        [Range(0.15f, 1f)] public float mobileEntryOpacity = 0.72f;
-        [Range(0.3f, 2f)] public float mobileGestureHoldSeconds = 0.75f;
-        public MobileEntryCorner mobileEntryCorner = MobileEntryCorner.TopRight;
+        [FormerlySerializedAs("mobileThreeFingerGesture")]
+        public bool enableThreeFingerGesture = true;
+        [FormerlySerializedAs("mobileGestureHoldSeconds")]
+        [Range(0.3f, 2f)] public float threeFingerGestureHoldSeconds = 0.75f;
 
         [Header("Slack")]
         [Tooltip("Slack bot token with chat:write and files:write. Used for both the report message and attachments.")]
@@ -117,6 +139,46 @@ namespace MacacaGames.RuntimeBugReporter
         public string reportTitle = "MACACA BEACON";
         public string privacyNotice = "This report sends your description, screenshot, recent logs, and device diagnostics to the development team for debugging only. A local copy is retained if upload fails.";
         public string[] categories = { "Gameplay", "UI", "Visual", "Audio", "Performance", "Other" };
+#endif
+
+#if MACACA_BEACON_PRODUCTION
+        [Obsolete("Use enableBugReporter instead.")]
+        public bool enabledInBuild => enableBugReporter;
+        [Obsolete("Use showEntryButton instead.")]
+        public bool mobileEntryButton => showEntryButton;
+        [Obsolete("Use mobileEntryButtonSize instead.")]
+        public float mobileEntrySize => mobileEntryButtonSize;
+        [Obsolete("Use entryButtonOpacity instead.")]
+        public float mobileEntryOpacity => entryButtonOpacity;
+        [Obsolete("Use enableThreeFingerGesture instead.")]
+        public bool mobileThreeFingerGesture => enableThreeFingerGesture;
+        [Obsolete("Use threeFingerGestureHoldSeconds instead.")]
+        public float mobileGestureHoldSeconds => threeFingerGestureHoldSeconds;
+#pragma warning disable 0618
+        [Obsolete("Use entryButtonCorner instead.")]
+        public MobileEntryCorner mobileEntryCorner => (MobileEntryCorner)entryButtonCorner;
+#pragma warning restore 0618
+#else
+        [Obsolete("Use enableBugReporter instead.")]
+        public bool enabledInBuild { get => enableBugReporter; set => enableBugReporter = value; }
+        [Obsolete("Use showEntryButton instead.")]
+        public bool mobileEntryButton { get => showEntryButton; set => showEntryButton = value; }
+        [Obsolete("Use mobileEntryButtonSize instead.")]
+        public float mobileEntrySize { get => mobileEntryButtonSize; set => mobileEntryButtonSize = value; }
+        [Obsolete("Use entryButtonOpacity instead.")]
+        public float mobileEntryOpacity { get => entryButtonOpacity; set => entryButtonOpacity = value; }
+        [Obsolete("Use enableThreeFingerGesture instead.")]
+        public bool mobileThreeFingerGesture { get => enableThreeFingerGesture; set => enableThreeFingerGesture = value; }
+        [Obsolete("Use threeFingerGestureHoldSeconds instead.")]
+        public float mobileGestureHoldSeconds { get => threeFingerGestureHoldSeconds; set => threeFingerGestureHoldSeconds = value; }
+#pragma warning disable 0618
+        [Obsolete("Use entryButtonCorner instead.")]
+        public MobileEntryCorner mobileEntryCorner
+        {
+            get => (MobileEntryCorner)entryButtonCorner;
+            set => entryButtonCorner = (EntryButtonCorner)value;
+        }
+#pragma warning restore 0618
 #endif
 
         public static BugReporterSettings LoadOrDefault()

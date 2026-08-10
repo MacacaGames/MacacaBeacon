@@ -10,13 +10,15 @@
 
 ## 專案內啟用
 
-這個 repository 已將套件放在 `Packages/com.macacagames.beacon`，Unity 會把它視為 embedded package。桌面進入 Play Mode 後直接按 **F6** 即可開啟；不需要在 Scene 放 prefab。手機平台預設顯示一個只佔自身矩形的小型 `!` 入口，也可以用三指按住約 0.75 秒開啟。
+這個 repository 已將套件放在 `Packages/com.macacagames.beacon`，Unity 會把它視為 embedded package。桌面進入 Play Mode 後直接按 **F6** 即可開啟；不需要在 Scene 放 prefab。勾選 `Show Entry Button` 後，桌面與手機都會顯示一個只佔自身矩形的小型 `!` 入口；iOS／Android 也可以用三指按住約 0.75 秒開啟。
 
 第一次設定請開啟：
 
 `Tools > Macaca Beacon > Open Settings`
 
 設定資產會建立於 `Assets/Resources/BugReporterSettings.asset`。
+
+`Enable Bug Reporter` 是完整總開關。關閉後不會建立 runtime controller、收集 log 或 rolling video，F6、入口、手勢、`BugReporter.Open()` 與影片錄製 API 也不會啟動 Beacon。若只想隱藏角落按鈕，關閉 `Show Entry Button` 即可；其他已啟用的入口仍可使用。
 
 ## Production 隔離
 
@@ -28,7 +30,7 @@
 
 `Appearance` 預設使用全螢幕並將介面縮放設為 1.25，寬螢幕採左右雙欄，小尺寸 Game View 自動切換成可捲動單欄。關閉 `Fullscreen` 後會改用置中視窗，並可調整背景遮罩透明度與桌面視窗寬度比例。
 
-手機入口設定位於 `Mobile entry`：可分別關閉角落按鈕或三指手勢，調整按鈕尺寸／透明度／位置。按鈕會依 `Screen.safeArea` 避開瀏海與 Home indicator，只有觸控落在按鈕自己的矩形內時才會攔截事件，不會替整個遊戲畫面鎖定觸控。
+跨平台角落入口位於 `Entry Button`：桌面與手機分別設定基礎尺寸，並共用透明度與角落位置。按鈕會把 `Screen.safeArea` 轉為 IMGUI 座標後避開瀏海與 Home indicator，只有指標或觸控落在按鈕自己的矩形內時才會攔截事件。三指設定獨立放在 `Mobile Gesture`，不受 `Show Entry Button` 影響。
 
 ## Slack 設定
 
@@ -43,7 +45,7 @@
 ## 會送出的資料
 
 - 使用者輸入：分類、標題、描述、選填聯絡資訊
-- PNG 截圖（按 F6、手機入口或三指手勢後、面板出現前擷取）
+- PNG 截圖（按 F6、角落入口或三指手勢後、面板出現前擷取）
 - 截圖上的選填畫筆標注
 - Product、version、build GUID、Unity、platform、OS、CPU、RAM、GPU、VRAM、resolution、scene
 - 有固定容量上限的 recent log ring buffer；Error／Exception 包含 stack trace
@@ -112,7 +114,7 @@ public sealed class GameBugContext : IBugReportDataProvider
 BugReporter.RegisterDataProvider(new GameBugContext());
 ```
 
-也可手動呼叫 `BugReporter.Open()`，或用 `BugReporter.SetTransport(customTransport)` 注入任何 `IBugReportTransport`。
+啟用 `Enable Bug Reporter` 後，也可手動呼叫 `BugReporter.Open()`，或用 `BugReporter.SetTransport(customTransport)` 注入任何 `IBugReportTransport`。
 
 Rolling video 也提供 runtime API，可在遊戲內依效能或隱私需求切換；切換不會修改 Settings asset：
 
