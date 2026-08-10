@@ -4,9 +4,11 @@
 
 ![Macaca Beacon](Documentation~/Images/macaca-beacon-banner.png)
 
-遊戲內、可抽離為 UPM 的 Bug Report 工具。它使用 **IMGUI**（不依賴 UGUI），桌面可用 F6 開啟，iOS／Android 則提供安全區角落的低干擾入口與三指長按手勢；工具會收集截圖、最近 log、裝置／build／場景資訊，並送到 Slack。
+遊戲內、可抽離為 UPM 的 Bug Report 工具。表單與影片預覽使用 **IMGUI**；桌面與手機皆可顯示安全區角落的低干擾入口，桌面另可用 F6、iOS／Android 可用三指長按手勢開啟。工具會收集截圖、最近 log、裝置／build／場景資訊，並送到 Slack。
 
 截圖預覽提供單層內建標注畫筆，圖片顯示後即可直接繪製，不需要進入另一個模式。工具列固定提供紅／黃／青三色、三種筆刷粗細、Undo、可復原的 Clear，以及重新截圖。完成的筆跡會合成進 Slack 與本地失敗備援所使用的 PNG。
+
+回報頁面的 `SCREENSHOT`／`VIDEO` tabs 可切換截圖標注與事件影片回顧。影片準備完成後可點擊／觸碰畫面切換播放與暫停；游標移到畫面上、拖曳時間軸或影片暫停時，畫面底部會顯示可拉動的播放進度與時間，不另外顯示重複的 Play／Restart 按鈕。整列可點、明示 `[ON]`／`[OFF]` 的 `Include video in this report` 開關決定本次是否附加影片；這不會修改全域 rolling-video 設定。非互動標題與提示文字不會在游標經過時顯示選取效果。影片畫面由 `VideoPlayer` 的 API-only texture 直接交給 IMGUI，不建立 RawImage、影片 Canvas、UGUI prefab 或中間 RenderTexture，也不會自動播放。
 
 ## 專案內啟用
 
@@ -64,6 +66,8 @@ macOS Editor／Standalone Player 與 iOS device／Simulator 會優先使用 Meta
 影片先寫進 `Application.temporaryCachePath`，建立 report 時再交易式複製到 PendingReports，Slack 則使用 `UploadHandlerFile` 直接由檔案上傳，避免另一份完整影片常駐 managed heap。Windows 與 Apple backend 在背景 thread 完成；Android 由 Unity main thread 啟動 Java encode job，實際檔案讀取、RGBA → YUV420 與 MediaCodec finalization 都在低優先序 Java worker 執行。回報表單在背景編碼期間仍可正常輸入，Send 會等影片 ready 後才開放。
 
 `Prefer Mp4` 預設開啟。若目前平台尚無 MP4 backend，或原生 H.264 encoder 暫時不可用，`Allow Legacy Avi Fallback` 可讓回報退回純 C# MJPEG AVI，而不是整份報告失敗。目前正式 MP4 backend 支援矩陣：
+
+頁面內預覽第一版以 H.264 MP4 為支援格式，並在 macOS、Windows、Android 與 iOS Player 使用 Unity 的平台 decoder。AVI fallback、WebGL local temporary file 或裝置 decoder 失敗時，VIDEO tab 會顯示無法預覽，但有效檔案仍可勾選並發送。影片沒有音訊。
 
 | 平台 | Runtime 影片輸出 |
 |---|---|
@@ -184,7 +188,7 @@ git commit -m "Update Macaca Beacon"
 
 `v0.5.0` 是目前的穩定版本 tag。更新到其他版本時，將 URL 最後的 tag 替換成指定版本，例如 `#v0.4.0`。由於 package 位於 repository 根目錄，Git URL 不需要 `path` 參數。
 
-套件 managed runtime assembly 沒有第三方相依；需要 Unity 的 IMGUI、UnityWebRequest、ScreenCapture 與 ImageConversion built-in modules。macOS／iOS MP4 backend 使用系統內建的 AVFoundation、VideoToolbox、CoreMedia、CoreVideo 與 Metal frameworks；Windows MP4 backend 使用系統內建的 Media Foundation 與 COM；Android MP4 backend 使用系統內建的 MediaCodec 與 MediaMuxer。ImageIO、WIC 與 Bitmap APIs 僅保留給 JPEG compatibility fallback。
+套件 managed runtime assembly 沒有第三方相依；需要 Unity 的 IMGUI、Video、UnityWebRequest、ScreenCapture 與 ImageConversion built-in modules。macOS／iOS MP4 backend 使用系統內建的 AVFoundation、VideoToolbox、CoreMedia、CoreVideo 與 Metal frameworks；Windows MP4 backend 使用系統內建的 Media Foundation 與 COM；Android MP4 backend 使用系統內建的 MediaCodec 與 MediaMuxer。ImageIO、WIC 與 Bitmap APIs 僅保留給 JPEG compatibility fallback。
 
 ## 參考
 

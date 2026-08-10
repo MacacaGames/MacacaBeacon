@@ -1,16 +1,28 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.Video;
 
 namespace MacacaGames.RuntimeBugReporter
 {
+    internal enum VideoReviewState
+    {
+        Preparing,
+        Ready,
+        Unavailable,
+        PreviewUnavailable
+    }
+
     internal sealed class BugReporterController : MonoBehaviour
     {
         private static readonly string[] AnnotationColorLabels = { "RED", "YELLOW", "CYAN" };
         private static readonly string[] AnnotationSizeLabels = { "S", "M", "L" };
+        private static readonly string[] CaptureTabLabels = { "SCREENSHOT", "VIDEO" };
+        private static readonly int VideoSeekControlHash = "MacacaBeaconVideoSeek".GetHashCode();
 
         internal static BugReporterController Instance { get; private set; }
         internal bool IsOpen { get; private set; }
@@ -21,6 +33,13 @@ namespace MacacaGames.RuntimeBugReporter
         private RollingVideoRecorder videoRecorder;
         private byte[] screenshotBytes;
         private VideoCaptureResult videoCapture;
+        private VideoPlayer videoPlayer;
+        private string preparedVideoPath;
+        private string videoPreviewError;
+        private int captureTabIndex;
+        private bool videoCaptureRequested;
+        private bool videoCaptureCompleted;
+        private bool includeVideoInReport;
         private Texture2D screenshotPreview;
         private ScreenshotAnnotator screenshotAnnotator;
         private int annotationColorIndex;
@@ -56,6 +75,8 @@ namespace MacacaGames.RuntimeBugReporter
         private GUIStyle closeButtonStyle;
         private GUIStyle statusStyle;
         private GUIStyle validationStyle;
+        private GUIStyle previewMessageStyle;
+        private GUIStyle inclusionToggleStyle;
         private readonly List<Texture2D> styleTextures = new List<Texture2D>();
         private Texture2D windowTexture;
         private Texture2D accentTexture;
@@ -74,6 +95,7 @@ namespace MacacaGames.RuntimeBugReporter
         // stacked so the form never collapses into a clipped sliver.
         private const float DesktopLayoutMinimumWidth = 1120f;
         private const float MobileLayoutMaximumWidth = 720f;
+        private const float HorizontalAnnotationToolbarMinimumWidth = 620f;
 
         internal void Initialize(BugReporterSettings value)
         {
@@ -96,8 +118,11 @@ namespace MacacaGames.RuntimeBugReporter
                 return;
             IsOpen = false;
             SetInputBlocker(false);
+            ResetVideoPreview();
             videoCapture?.DeleteFile();
             videoCapture = null;
+            captureTabIndex = 0;
+            includeVideoInReport = false;
             Cursor.lockState = previousCursorLock;
             Cursor.visible = previousCursorVisible;
             status = "";
@@ -121,6 +146,14 @@ namespace MacacaGames.RuntimeBugReporter
         private void OnDestroy()
         {
             if (Instance == this) Instance = null;
+            ResetVideoPreview();
+            if (videoPlayer != null)
+            {
+                videoPlayer.prepareCompleted -= OnVideoPrepared;
+                videoPlayer.errorReceived -= OnVideoError;
+            }
+            videoCapture?.DeleteFile();
+            videoCapture = null;
             logs?.Dispose();
             videoRecorder?.Dispose();
             if (inputBlocker != null)
@@ -193,8 +226,13 @@ namespace MacacaGames.RuntimeBugReporter
             isOpening = true;
             status = "Capturing context…";
             screenshotBytes = null;
+            ResetVideoPreview();
             videoCapture?.DeleteFile();
             videoCapture = null;
+            captureTabIndex = 0;
+            includeVideoInReport = false;
+            videoCaptureRequested = videoRecorder != null && videoRecorder.IsEnabled;
+            videoCaptureCompleted = false;
             screenshotAnnotator = null;
             videoRecorder.MarkIncident(result =>
             {
@@ -204,10 +242,13 @@ namespace MacacaGames.RuntimeBugReporter
                     return;
                 }
                 videoCapture = result;
+                videoCaptureCompleted = true;
+                includeVideoInReport = DefaultVideoInclusion(result);
+                var hasCapture = includeVideoInReport;
                 if (IsOpen)
                 {
-                    statusIsError = result == null;
-                    status = result == null
+                    statusIsError = !hasCapture;
+                    status = !hasCapture
                         ? "Video could not be finalized. The report can still be sent without it."
                         : result.Extension.TrimStart('.').ToUpperInvariant() + " video ready (" + result.DurationSeconds.ToString("0.0") + "s).";
                 }
@@ -232,9 +273,11 @@ namespace MacacaGames.RuntimeBugReporter
             IsOpen = true;
             SetInputBlocker(true);
             pendingFocusControl = "BugReportTitle";
-            status = settings.enableRollingVideo && settings.secondsAfter > 0
+            status = !videoCaptureCompleted && videoCaptureRequested && settings.secondsAfter > 0
                 ? "Recording the seconds after the incident…"
-                : "Ready to send.";
+                : HasVideoCaptureFile(videoCapture)
+                    ? videoCapture.Extension.TrimStart('.').ToUpperInvariant() + " video ready (" + videoCapture.DurationSeconds.ToString("0.0") + "s)."
+                    : "Ready to send.";
         }
 
         private void OnGUI()
@@ -411,7 +454,7 @@ namespace MacacaGames.RuntimeBugReporter
             contentScroll = GUILayout.BeginScrollView(contentScroll, false, true, GUILayout.ExpandHeight(true));
             var previewWidth = Mathf.Max(100f,
                 leftWidth - cardStyle.padding.left - cardStyle.padding.right - 24f * styleScale);
-            DrawScreenshotPanel(previewWidth, Mathf.Clamp(contentHeight * 0.36f, 220f, 480f));
+            DrawCaptureReviewPanel(previewWidth, Mathf.Clamp(contentHeight * 0.36f, 220f, 480f));
             GUILayout.Space(16 * styleScale);
             DrawCaptureSummary();
             GUILayout.FlexibleSpace();
@@ -573,7 +616,7 @@ namespace MacacaGames.RuntimeBugReporter
             formScroll = GUILayout.BeginScrollView(formScroll, false, true, GUILayout.ExpandHeight(true));
             var previewWidth = Mathf.Max(100f,
                 windowRect.width - 56f * styleScale - cardStyle.padding.left - cardStyle.padding.right - 24f * styleScale);
-            DrawScreenshotPanel(previewWidth, Mathf.Clamp(windowRect.width * 0.58f, 200f, 460f));
+            DrawCaptureReviewPanel(previewWidth, Mathf.Clamp(windowRect.width * 0.58f, 200f, 460f));
             GUILayout.Space(14 * styleScale);
             DrawCaptureSummary();
             GUILayout.Space(18 * styleScale);
@@ -586,12 +629,30 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.EndHorizontal();
         }
 
+        private void DrawCaptureReviewPanel(float previewWidth, float fallbackHeight)
+        {
+            var previousTab = captureTabIndex;
+            captureTabIndex = GUILayout.Toolbar(
+                captureTabIndex,
+                CaptureTabLabels,
+                categoryStyle,
+                GUILayout.Height(44f * styleScale));
+            if (previousTab == 1 && captureTabIndex == 0 && videoPlayer != null && videoPlayer.isPlaying)
+                videoPlayer.Pause();
+
+            GUILayout.Space(10f * styleScale);
+            if (captureTabIndex == 0)
+                DrawScreenshotPanel(previewWidth, fallbackHeight);
+            else
+                DrawVideoPanel(previewWidth, fallbackHeight);
+        }
+
         private void DrawScreenshotPanel(float previewWidth, float fallbackHeight)
         {
             GUILayout.BeginHorizontal();
             DrawLabel("SCREENSHOT");
             GUILayout.FlexibleSpace();
-            statusStyle.normal.textColor = new Color(0.09f, 0.48f, 0.50f);
+            SetStaticLabelColor(statusStyle, new Color(0.09f, 0.48f, 0.50f));
             GUILayout.Label(screenshotBytes != null ? "READY" : "UNAVAILABLE", statusStyle);
             GUILayout.EndHorizontal();
 
@@ -630,19 +691,331 @@ namespace MacacaGames.RuntimeBugReporter
             }
 
             GUILayout.Space(10 * styleScale);
-            DrawAnnotationToolbar(!isSending && !isOpening && screenshotAnnotator != null);
+            DrawAnnotationToolbar(!isSending && !isOpening && screenshotAnnotator != null, previewWidth);
             GUI.enabled = true;
         }
 
-        private void DrawAnnotationToolbar(bool canInteract)
+        private void DrawVideoPanel(float previewWidth, float fallbackHeight)
         {
-            var compact = !CanUseDesktopLayout();
-            if (compact)
+            var reviewState = CurrentVideoReviewState();
+            GUILayout.BeginHorizontal();
+            DrawLabel("VIDEO REVIEW");
+            GUILayout.FlexibleSpace();
+            SetStaticLabelColor(statusStyle, reviewState == VideoReviewState.Unavailable
+                ? new Color(0.70f, 0.23f, 0.20f)
+                : new Color(0.09f, 0.48f, 0.50f));
+            GUILayout.Label(VideoReviewStatusLabel(reviewState), statusStyle);
+            GUILayout.EndHorizontal();
+
+            var previewHeight = Mathf.Max(160f * styleScale, fallbackHeight);
+            GUILayout.BeginHorizontal();
+            GUILayout.FlexibleSpace();
+            var rect = GUILayoutUtility.GetRect(
+                previewWidth,
+                previewHeight,
+                GUILayout.Width(previewWidth),
+                GUILayout.Height(previewHeight));
+            GUILayout.FlexibleSpace();
+            GUILayout.EndHorizontal();
+            GUI.DrawTexture(rect, fieldTexture);
+
+            if (reviewState == VideoReviewState.Ready)
+                EnsureVideoPreview();
+
+            var texture = videoPlayer != null && videoPlayer.isPrepared ? videoPlayer.texture : null;
+            if (reviewState == VideoReviewState.Ready && texture != null)
+            {
+                var imageRect = new Rect(rect.x + 3f, rect.y + 3f, rect.width - 6f, rect.height - 6f);
+                GUI.DrawTexture(imageRect, texture, ScaleMode.ScaleToFit, false);
+                DrawVideoInteraction(imageRect);
+            }
+            else
+            {
+                GUI.Label(rect, VideoReviewMessage(reviewState), previewMessageStyle);
+            }
+
+            GUILayout.Space(10f * styleScale);
+            var canInclude = HasVideoCaptureFile(videoCapture);
+            if (!canInclude)
+                includeVideoInReport = false;
+            GUI.enabled = canInclude && !isSending;
+            var inclusionLabel = includeVideoInReport
+                ? "[ON]  INCLUDE VIDEO IN THIS REPORT"
+                : "[OFF]  INCLUDE VIDEO IN THIS REPORT";
+            includeVideoInReport = GUILayout.Toggle(
+                includeVideoInReport,
+                inclusionLabel,
+                inclusionToggleStyle,
+                GUILayout.Height((IsMobileLayout() ? 56f : 50f) * styleScale),
+                GUILayout.ExpandWidth(true));
+            GUI.enabled = true;
+        }
+
+        private void DrawVideoInteraction(Rect imageRect)
+        {
+            var duration = videoPlayer.length > 0d ? videoPlayer.length : videoCapture.DurationSeconds;
+            var overlayHeight = (IsMobileLayout() ? 52f : 44f) * styleScale;
+            var overlayRect = new Rect(imageRect.x, imageRect.yMax - overlayHeight, imageRect.width, overlayHeight);
+            var horizontalPadding = 14f * styleScale;
+            var trackRect = new Rect(
+                overlayRect.x + horizontalPadding,
+                overlayRect.y + 11f * styleScale,
+                Mathf.Max(1f, overlayRect.width - horizontalPadding * 2f),
+                4f * styleScale);
+            var seekHitRect = new Rect(trackRect.x, overlayRect.y, trackRect.width, 28f * styleScale);
+            var seekControlId = GUIUtility.GetControlID(VideoSeekControlHash, FocusType.Passive, seekHitRect);
+            var pointerOverVideo = imageRect.Contains(Event.current.mousePosition);
+            var isSeeking = GUIUtility.hotControl == seekControlId;
+            var showControls = !videoPlayer.isPlaying || pointerOverVideo || isSeeking;
+
+            if (showControls)
+            {
+                DrawVideoTimeline(overlayRect, trackRect, duration);
+                HandleVideoSeek(seekControlId, seekHitRect, duration);
+            }
+
+            var current = Event.current;
+            if (!isSending && current.type == EventType.MouseDown && current.button == 0 && imageRect.Contains(current.mousePosition))
+            {
+                ToggleVideoPlayback();
+                current.Use();
+            }
+        }
+
+        private void DrawVideoTimeline(Rect overlayRect, Rect trackRect, double duration)
+        {
+            if (Event.current.type != EventType.Repaint)
+                return;
+
+            var previousColor = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.68f);
+            GUI.DrawTexture(overlayRect, Texture2D.whiteTexture);
+            GUI.color = new Color(1f, 1f, 1f, 0.38f);
+            GUI.DrawTexture(trackRect, Texture2D.whiteTexture);
+
+            var progress = duration > 0d ? Mathf.Clamp01((float)(videoPlayer.time / duration)) : 0f;
+            var playedRect = new Rect(trackRect.x, trackRect.y, trackRect.width * progress, trackRect.height);
+            GUI.color = new Color(0.09f, 0.70f, 0.72f, 1f);
+            GUI.DrawTexture(playedRect, Texture2D.whiteTexture);
+            var handleSize = 10f * styleScale;
+            GUI.DrawTexture(
+                new Rect(trackRect.x + trackRect.width * progress - handleSize * 0.5f, trackRect.center.y - handleSize * 0.5f, handleSize, handleSize),
+                Texture2D.whiteTexture);
+            GUI.color = previousColor;
+
+            var timeRect = new Rect(
+                overlayRect.x + 12f * styleScale,
+                overlayRect.y + 20f * styleScale,
+                overlayRect.width - 24f * styleScale,
+                22f * styleScale);
+            GUI.Label(timeRect, FormatVideoTime(videoPlayer.time) + " / " + FormatVideoTime(duration), hintStyle);
+        }
+
+        private void HandleVideoSeek(int controlId, Rect hitRect, double duration)
+        {
+            if (isSending || !videoPlayer.canSetTime || duration <= 0d)
+                return;
+
+            var current = Event.current;
+            switch (current.GetTypeForControl(controlId))
+            {
+                case EventType.MouseDown:
+                    if (current.button != 0 || !hitRect.Contains(current.mousePosition))
+                        return;
+                    GUIUtility.hotControl = controlId;
+                    SeekVideo(current.mousePosition.x, hitRect, duration);
+                    current.Use();
+                    break;
+                case EventType.MouseDrag:
+                    if (GUIUtility.hotControl != controlId)
+                        return;
+                    SeekVideo(current.mousePosition.x, hitRect, duration);
+                    current.Use();
+                    break;
+                case EventType.MouseUp:
+                    if (GUIUtility.hotControl != controlId || current.button != 0)
+                        return;
+                    SeekVideo(current.mousePosition.x, hitRect, duration);
+                    GUIUtility.hotControl = 0;
+                    current.Use();
+                    break;
+            }
+        }
+
+        private void SeekVideo(float pointerX, Rect trackRect, double duration)
+        {
+            videoPlayer.time = VideoTimeFromPointer(pointerX, trackRect.xMin, trackRect.width, duration);
+        }
+
+        private void ToggleVideoPlayback()
+        {
+            if (videoPlayer.isPlaying)
+            {
+                videoPlayer.Pause();
+                return;
+            }
+
+            if (videoPlayer.length > 0d && videoPlayer.time >= videoPlayer.length - 0.05d)
+                videoPlayer.time = 0d;
+            videoPlayer.Play();
+        }
+
+        private void EnsureVideoPreview()
+        {
+            if (isSending || !HasVideoCaptureFile(videoCapture) || !CanPreviewVideo(videoCapture.Extension, IsWebGlPlayer()))
+                return;
+            if (videoPlayer != null && preparedVideoPath == videoCapture.FilePath)
+                return;
+
+            ResetVideoPreview();
+            if (videoPlayer == null)
+            {
+                videoPlayer = gameObject.AddComponent<VideoPlayer>();
+                videoPlayer.playOnAwake = false;
+                videoPlayer.renderMode = VideoRenderMode.APIOnly;
+                videoPlayer.audioOutputMode = VideoAudioOutputMode.None;
+                videoPlayer.isLooping = false;
+                videoPlayer.skipOnDrop = true;
+                videoPlayer.prepareCompleted += OnVideoPrepared;
+                videoPlayer.errorReceived += OnVideoError;
+            }
+
+            preparedVideoPath = videoCapture.FilePath;
+            videoPlayer.source = VideoSource.Url;
+            videoPlayer.url = preparedVideoPath;
+            videoPlayer.Prepare();
+        }
+
+        private void ResetVideoPreview()
+        {
+            if (videoPlayer != null)
+            {
+                videoPlayer.Stop();
+                videoPlayer.url = string.Empty;
+            }
+            preparedVideoPath = null;
+            videoPreviewError = null;
+        }
+
+        private void OnVideoPrepared(VideoPlayer source)
+        {
+            if (source == videoPlayer && source.url == preparedVideoPath)
+                videoPreviewError = null;
+        }
+
+        private void OnVideoError(VideoPlayer source, string message)
+        {
+            if (source == videoPlayer && source.url == preparedVideoPath)
+            {
+                videoPreviewError = string.IsNullOrEmpty(message) ? "Unity could not preview this video." : message;
+                source.Stop();
+                source.url = string.Empty;
+            }
+        }
+
+        private VideoReviewState CurrentVideoReviewState()
+        {
+            var hasFile = HasVideoCaptureFile(videoCapture);
+            var previewUnavailable = hasFile &&
+                (!CanPreviewVideo(videoCapture.Extension, IsWebGlPlayer()) || !string.IsNullOrEmpty(videoPreviewError));
+            return GetVideoReviewState(videoCaptureRequested && !videoCaptureCompleted, hasFile, previewUnavailable);
+        }
+
+        internal static VideoReviewState GetVideoReviewState(bool preparing, bool hasCaptureFile, bool previewUnavailable)
+        {
+            if (!hasCaptureFile)
+                return preparing ? VideoReviewState.Preparing : VideoReviewState.Unavailable;
+            return previewUnavailable ? VideoReviewState.PreviewUnavailable : VideoReviewState.Ready;
+        }
+
+        internal static bool HasVideoCaptureFile(VideoCaptureResult capture)
+        {
+            if (capture == null || string.IsNullOrEmpty(capture.FilePath) || !File.Exists(capture.FilePath))
+                return false;
+            try { return new FileInfo(capture.FilePath).Length > 0; }
+            catch { return false; }
+        }
+
+        internal static bool DefaultVideoInclusion(VideoCaptureResult capture)
+        {
+            return HasVideoCaptureFile(capture);
+        }
+
+        internal static bool ShouldAttachVideo(bool includeVideo, VideoCaptureResult capture)
+        {
+            return includeVideo && HasVideoCaptureFile(capture);
+        }
+
+        internal static bool CanPreviewVideo(string extension, bool webGlPlayer)
+        {
+            return !webGlPlayer && string.Equals(extension, ".mp4", StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal static double VideoTimeFromPointer(double pointerX, double trackX, double trackWidth, double duration)
+        {
+            if (trackWidth <= 0d || duration <= 0d)
+                return 0d;
+            return Math.Max(0d, Math.Min(1d, (pointerX - trackX) / trackWidth)) * duration;
+        }
+
+        private static bool IsWebGlPlayer()
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            return true;
+#else
+            return false;
+#endif
+        }
+
+        private string VideoReviewMessage(VideoReviewState state)
+        {
+            switch (state)
+            {
+                case VideoReviewState.Preparing:
+                    return videoRecorder != null && videoRecorder.IsEncoding
+                        ? "Encoding video in the background…"
+                        : "Recording the seconds after the incident…";
+                case VideoReviewState.PreviewUnavailable:
+                    if (!CanPreviewVideo(videoCapture.Extension, IsWebGlPlayer()))
+                        return videoCapture.Extension.TrimStart('.').ToUpperInvariant() + " preview is unavailable in this build.\nThe video can still be included in the report.";
+                    return "Video preview failed.\nThe video can still be included in the report.\n" + videoPreviewError;
+                case VideoReviewState.Unavailable:
+                    return videoCaptureRequested
+                        ? "No video was recorded.\nYou can still send the screenshot and diagnostics."
+                        : "Video recording was disabled when this report opened.";
+                default:
+                    return videoPlayer != null && videoPlayer.isPrepared
+                        ? string.Empty
+                        : "Preparing video preview…";
+            }
+        }
+
+        private static string VideoReviewStatusLabel(VideoReviewState state)
+        {
+            switch (state)
+            {
+                case VideoReviewState.Preparing: return "PREPARING";
+                case VideoReviewState.Ready: return "READY";
+                case VideoReviewState.PreviewUnavailable: return "PREVIEW UNAVAILABLE";
+                default: return "UNAVAILABLE";
+            }
+        }
+
+        private static string FormatVideoTime(double seconds)
+        {
+            seconds = Math.Max(0d, seconds);
+            return Math.Floor(seconds / 60d).ToString("0") + ":" + Math.Floor(seconds % 60d).ToString("00");
+        }
+
+        private void DrawAnnotationToolbar(bool canInteract, float availableWidth)
+        {
+            var stacked = ShouldStackAnnotationToolbar(availableWidth, styleScale);
+            if (stacked)
             {
                 GUILayout.Label("DRAW ON THE SCREENSHOT", labelStyle);
                 GUILayout.Space(6 * styleScale);
             }
-            if (compact)
+            if (stacked)
             {
                 GUILayout.BeginHorizontal();
                 DrawAnnotationButton("UNDO", canInteract && screenshotAnnotator.CanUndo, () => screenshotAnnotator.Undo());
@@ -662,7 +1035,7 @@ namespace MacacaGames.RuntimeBugReporter
             }
             GUILayout.Space(8 * styleScale);
 
-            if (compact)
+            if (stacked)
             {
                 annotationColorIndex = GUILayout.SelectionGrid(annotationColorIndex, AnnotationColorLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
                 GUILayout.Space(8 * styleScale);
@@ -676,6 +1049,11 @@ namespace MacacaGames.RuntimeBugReporter
                 annotationSizeIndex = GUILayout.SelectionGrid(annotationSizeIndex, AnnotationSizeLabels, 3, categoryStyle, GUILayout.Width(210 * styleScale), GUILayout.Height(44 * styleScale));
                 GUILayout.EndHorizontal();
             }
+        }
+
+        internal static bool ShouldStackAnnotationToolbar(float availableWidth, float scale)
+        {
+            return availableWidth < HorizontalAnnotationToolbarMinimumWidth * Mathf.Max(0.1f, scale);
         }
 
         private void DrawAnnotationButton(string label, bool enabled, Action action, float width = -1f)
@@ -751,15 +1129,19 @@ namespace MacacaGames.RuntimeBugReporter
             var screenshotState = settings.includeScreenshot && screenshotBytes != null
                 ? screenshotAnnotator != null && screenshotAnnotator.HasAnnotations ? "[READY] Screenshot + annotations" : "[READY] Screenshot"
                 : "[OFF] Screenshot";
-            var videoState = !settings.enableRollingVideo
-                ? "[OFF] Video"
-                : videoRecorder.IsEncoding
-                    ? "[WAIT] Video encoding in background"
-                    : videoRecorder.IsFinalizing
-                        ? "[WAIT] Video recording"
-                        : videoCapture != null
-                            ? "[READY] " + videoCapture.Extension.TrimStart('.').ToUpperInvariant() + " video"
-                            : "[OFF] Video unavailable";
+            var videoReviewState = CurrentVideoReviewState();
+            string videoState;
+            if (videoReviewState == VideoReviewState.Preparing)
+                videoState = videoRecorder.IsEncoding ? "[WAIT] Video encoding in background" : "[WAIT] Video recording";
+            else if (videoReviewState == VideoReviewState.Unavailable)
+                videoState = videoCaptureRequested ? "[OFF] Video unavailable" : "[OFF] Video not recorded";
+            else
+            {
+                var previewNote = videoReviewState == VideoReviewState.PreviewUnavailable ? " (preview unavailable)" : string.Empty;
+                videoState = includeVideoInReport
+                    ? "[READY] " + videoCapture.Extension.TrimStart('.').ToUpperInvariant() + " video included" + previewNote
+                    : "[OFF] " + videoCapture.Extension.TrimStart('.').ToUpperInvariant() + " video excluded" + previewNote;
+            }
             var logState = settings.includeRecentLogs ? "[READY] Recent logs" : "[OFF] Recent logs";
             GUILayout.Label(screenshotState + "\n" + videoState + "\n" + logState, hintStyle);
         }
@@ -794,7 +1176,7 @@ namespace MacacaGames.RuntimeBugReporter
             if (!string.IsNullOrEmpty(status))
             {
                 GUILayout.Space(10 * styleScale);
-                statusStyle.normal.textColor = statusIsError ? new Color(0.70f, 0.23f, 0.20f) : new Color(0.09f, 0.48f, 0.50f);
+                SetStaticLabelColor(statusStyle, statusIsError ? new Color(0.70f, 0.23f, 0.20f) : new Color(0.09f, 0.48f, 0.50f));
                 GUILayout.Label(status, statusStyle);
             }
         }
@@ -846,6 +1228,7 @@ namespace MacacaGames.RuntimeBugReporter
             isSending = true;
             statusIsError = false;
             status = "Sending report…";
+            ResetVideoPreview();
             var report = BuildReport();
             string localArchivePath = null;
             string localArchiveError = null;
@@ -908,7 +1291,7 @@ namespace MacacaGames.RuntimeBugReporter
                     : screenshotBytes;
                 AddAttachmentIfAllowed(report, new BugReportAttachment("bug-" + report.Id + ".png", "image/png", finalScreenshot, "Game screenshot at report time with optional annotations"));
             }
-            if (videoCapture != null)
+            if (ShouldAttachVideo(includeVideoInReport, videoCapture))
             {
                 var videoAttachment = BugReportAttachment.FromFile(
                     "bug-" + report.Id + videoCapture.Extension,
@@ -1052,7 +1435,7 @@ namespace MacacaGames.RuntimeBugReporter
                 alignment = TextAnchor.MiddleLeft,
                 margin = new RectOffset(0, 0, 0, 0)
             };
-            titleStyle.normal.textColor = new Color(0.247f, 0.227f, 0.196f);
+            SetStaticLabelColor(titleStyle, new Color(0.247f, 0.227f, 0.196f));
 
             subtitleStyle = new GUIStyle(GUI.skin.label)
             {
@@ -1060,7 +1443,7 @@ namespace MacacaGames.RuntimeBugReporter
                 alignment = TextAnchor.MiddleLeft,
                 margin = new RectOffset(0, 0, 2, 0)
             };
-            subtitleStyle.normal.textColor = new Color(0.42f, 0.39f, 0.34f);
+            SetStaticLabelColor(subtitleStyle, new Color(0.42f, 0.39f, 0.34f));
 
             labelStyle = new GUIStyle(GUI.skin.label)
             {
@@ -1068,7 +1451,7 @@ namespace MacacaGames.RuntimeBugReporter
                 fontStyle = FontStyle.Bold,
                 margin = new RectOffset(0, 0, Mathf.RoundToInt(3 * scale), Mathf.RoundToInt(7 * scale))
             };
-            labelStyle.normal.textColor = new Color(0.31f, 0.29f, 0.25f);
+            SetStaticLabelColor(labelStyle, new Color(0.31f, 0.29f, 0.25f));
 
             hintStyle = new GUIStyle(GUI.skin.label)
             {
@@ -1076,7 +1459,7 @@ namespace MacacaGames.RuntimeBugReporter
                 wordWrap = true,
                 alignment = TextAnchor.MiddleLeft
             };
-            hintStyle.normal.textColor = new Color(0.43f, 0.40f, 0.35f);
+            SetStaticLabelColor(hintStyle, new Color(0.43f, 0.40f, 0.35f));
 
             cardStyle = new GUIStyle(GUI.skin.box)
             {
@@ -1111,9 +1494,25 @@ namespace MacacaGames.RuntimeBugReporter
             closeButtonStyle = new GUIStyle(buttonStyle) { fontSize = Mathf.RoundToInt(14 * scale) };
 
             statusStyle = new GUIStyle(hintStyle) { fontStyle = FontStyle.Bold };
-            statusStyle.normal.textColor = new Color(0.09f, 0.48f, 0.50f);
+            SetStaticLabelColor(statusStyle, new Color(0.09f, 0.48f, 0.50f));
             validationStyle = new GUIStyle(hintStyle) { fontStyle = FontStyle.Bold };
-            validationStyle.normal.textColor = new Color(0.70f, 0.23f, 0.20f);
+            SetStaticLabelColor(validationStyle, new Color(0.70f, 0.23f, 0.20f));
+            previewMessageStyle = new GUIStyle(hintStyle)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                padding = new RectOffset(Mathf.RoundToInt(20 * scale), Mathf.RoundToInt(20 * scale), 0, 0)
+            };
+            SetStaticLabelColor(previewMessageStyle, new Color(0.88f, 0.90f, 0.93f));
+
+            inclusionToggleStyle = new GUIStyle(categoryStyle)
+            {
+                alignment = TextAnchor.MiddleLeft,
+                fontSize = Mathf.RoundToInt(15 * scale),
+                padding = new RectOffset(Mathf.RoundToInt(16 * scale), Mathf.RoundToInt(16 * scale), 0, 0),
+                margin = new RectOffset(0, 0, 2, 2)
+            };
+            inclusionToggleStyle.focused.background = secondaryHover;
+            inclusionToggleStyle.onFocused.background = selectedHover;
 
             entryButtonStyle = CreateButtonStyle(scale, accent, accentHover, accentActive, new Color(0.17f, 0.15f, 0.13f));
             entryButtonStyle.fontSize = Mathf.RoundToInt((UsesMobileEntryLayout() ? 24 : 18) * scale);
@@ -1165,6 +1564,13 @@ namespace MacacaGames.RuntimeBugReporter
             style.focused.background = hover;
             style.normal.textColor = style.hover.textColor = style.active.textColor = style.focused.textColor = text;
             return style;
+        }
+
+        private static void SetStaticLabelColor(GUIStyle style, Color color)
+        {
+            style.normal.textColor = color;
+            style.hover.textColor = color;
+            style.hover.background = style.normal.background;
         }
 
         private Texture2D MakeTexture(Color color)

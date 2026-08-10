@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Added IMGUI Screenshot and Video review tabs with API-only `VideoPlayer` playback, click/tap play-pause, and a draggable in-frame timeline for finalized H.264 MP4 incident files.
+- Added a per-report video inclusion toggle and explicit preparing, unavailable, and preview-unsupported states.
+- Made video inclusion a prominent full-row ON/OFF toggle and removed selection-like hover feedback from non-interactive report text.
+- Fixed screenshot review clipping and unwanted horizontal scrolling by wrapping annotation controls from the capture column's actual width.
+- Removed the redundant Play and Restart row after moving playback and seeking into the video frame.
+- Kept valid recordings attachable when local preview is unavailable, including AVI fallback and decoder failures.
+
 ## 0.5.1
 
 - Added compile-time Production isolation with the `MACACA_BEACON_PRODUCTION` define.
