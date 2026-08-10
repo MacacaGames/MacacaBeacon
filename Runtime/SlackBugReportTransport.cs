@@ -12,6 +12,8 @@ namespace MacacaGames.RuntimeBugReporter
         private const string PostMessageEndpoint = "https://slack.com/api/chat.postMessage";
         private const string UploadUrlEndpoint = "https://slack.com/api/files.getUploadURLExternal";
         private const string CompleteUploadEndpoint = "https://slack.com/api/files.completeUploadExternal";
+        // Stable marker for Slack automation rules. Keep [BugReport] unchanged.
+        private const string AutomationMarker = "🐒 [BugReport]";
         private readonly string botToken;
         private readonly string channelId;
 
@@ -50,6 +52,25 @@ namespace MacacaGames.RuntimeBugReporter
                     yield break;
                 }
                 parentMessageTs = parsed.ts;
+            }
+
+            // Keep the channel readable. The parent contains only the summary;
+            // the complete context remains available in the report thread.
+            var detailPayload = "{\"channel\":\"" + JsonEscape(channelId) + "\",\"thread_ts\":\""
+                + JsonEscape(parentMessageTs) + "\",\"text\":\"" + JsonEscape(BuildSlackThreadMessage(report)) + "\"}";
+            using (var request = AuthorizedJsonRequest(PostMessageEndpoint, detailPayload))
+            {
+                yield return request.SendWebRequest();
+                var response = request.downloadHandler == null ? "" : request.downloadHandler.text;
+                var detailResponse = string.IsNullOrEmpty(response) ? null : JsonUtility.FromJson<SlackPostMessageResponse>(response);
+                if (request.result != UnityWebRequest.Result.Success || detailResponse == null || !detailResponse.ok)
+                {
+                    var error = detailResponse != null && !string.IsNullOrEmpty(detailResponse.error)
+                        ? detailResponse.error
+                        : RequestError(request);
+                    completed?.Invoke(BugReportSendResult.Fail("Report summary sent, but Slack could not add report details to its thread: " + error));
+                    yield break;
+                }
             }
 
             if (report.Attachments.Count == 0)
@@ -150,47 +171,37 @@ namespace MacacaGames.RuntimeBugReporter
         private static string BuildSlackMessage(BugReport report)
         {
             var builder = new StringBuilder();
-            builder.Append(":beetle: *").Append(SlackEscape(report.Title)).Append("*\n");
-            builder.Append("*ID:* `").Append(report.Id).Append("`  *Category:* ").Append(SlackEscape(report.Category)).Append('\n');
-            if (!string.IsNullOrWhiteSpace(report.Reporter))
-                builder.Append("*Reporter:* ").Append(SlackEscape(report.Reporter)).Append('\n');
-            builder.Append("*Description:*\n").Append(SlackEscape(report.Description)).Append('\n');
-
-            // Keep the high-signal context visible in the notification without making
-            // the report header unnecessarily tall. The full diagnostics attachment
-            // still contains the same values plus graphics and display details.
-            AppendCompactFields(builder, report, "Build", "Scene", "UTC");
-            AppendCompactFields(builder, report, "Device Model", "CPU", "RAM", "OS", "GPU");
-
-            foreach (var field in report.Fields)
-            {
-                if (field.Key == "Build" || field.Key == "Scene" || field.Key == "UTC" ||
-                    field.Key == "Device Model" || field.Key == "CPU" || field.Key == "RAM" ||
-                    field.Key == "OS" || field.Key == "GPU")
-                    continue;
-
-                builder.Append("*").Append(SlackEscape(field.Key)).Append(":* ").Append(SlackEscape(field.Value)).Append('\n');
-            }
+            // Keep the category marker as plain text. Slack does not reliably parse
+            // mrkdwn placed directly inside full-width brackets.
+            builder.Append(AutomationMarker).Append('\n')
+                .Append("【").Append(SlackEscape(report.Category)).Append("】 ")
+                .Append(SlackEscape(report.Title));
+            if (!string.IsNullOrWhiteSpace(report.Description))
+                builder.Append('\n').Append(SlackEscape(report.Description));
             return builder.ToString();
         }
 
-        private static void AppendCompactFields(StringBuilder builder, BugReport report, params string[] keys)
+        private static string BuildSlackThreadMessage(BugReport report)
         {
-            var hasValue = false;
-            foreach (var key in keys)
+            var builder = new StringBuilder();
+            builder.Append("*Bug report details*\n");
+            if (!string.IsNullOrWhiteSpace(report.Title))
+                builder.Append("*Title:* ").Append(SlackEscape(report.Title)).Append('\n');
+            builder.Append("*ID:* `").Append(SlackEscape(report.Id)).Append("`\n");
+            builder.Append("*Category:* ").Append(SlackEscape(report.Category)).Append('\n');
+            if (!string.IsNullOrWhiteSpace(report.Reporter))
+                builder.Append("*Reporter:* ").Append(SlackEscape(report.Reporter)).Append('\n');
+            if (!string.IsNullOrWhiteSpace(report.Description))
+                builder.Append("*Description:*\n").Append(SlackEscape(report.Description)).Append('\n');
+
+            foreach (var field in report.Fields)
             {
-                string value;
-                if (!report.Fields.TryGetValue(key, out value) || string.IsNullOrWhiteSpace(value))
+                if (string.IsNullOrWhiteSpace(field.Value))
                     continue;
-
-                if (hasValue)
-                    builder.Append("  •  ");
-                builder.Append("*").Append(SlackEscape(key)).Append(":* ").Append(SlackEscape(value));
-                hasValue = true;
+                builder.Append("*").Append(SlackEscape(field.Key)).Append(":* ")
+                    .Append(SlackEscape(field.Value)).Append('\n');
             }
-
-            if (hasValue)
-                builder.Append('\n');
+            return builder.ToString();
         }
 
         private static string BuildCompleteUploadPayload(List<UploadedFile> files, string channel, string threadTs, string comment)
