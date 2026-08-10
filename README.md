@@ -53,7 +53,7 @@
 
 ## 錄影限制
 
-`Enable Rolling Video` 預設關閉。啟用後會使用 `AsyncGPUReadback` 擷取縮放後的 RGBA frame，非同步寫入 `Application.temporaryCachePath` 的有時限 ring buffer。正常路徑不再建立 `Texture2D`、不執行 `EncodeToJPG`，也不把完整 rolling frame 集合常駐 managed heap。事件完成編碼或 runtime 關閉錄影後，raw cache 會自動清除。只有不支援 async GPU readback 的裝置才使用低頻 JPEG compatibility fallback。
+`Enable Rolling Video` 預設關閉。macOS、iOS、Android 與 Windows 會依平台優先使用 GPU readback/native encoder；WebGL 則刻意使用 CPU JPEG capture，避開瀏覽器的 `AsyncGPUReadback` fence 問題，再交給瀏覽器 WebCodecs 做最後的 H.264 編碼。事件完成編碼或 runtime 關閉錄影後，rolling frame cache 會自動清除。
 
 `Maximum Video Cache Megabytes` 預設為 512 MB。直式 960 px、6 FPS、8 秒歷史通常需要比橫式畫面更多 temporary space；raw cache 超過上限時會先丟棄最舊 frame，因此低儲存空間裝置的實際保留秒數可能短於 `Seconds Before`。啟動事件時會在 log 顯示 requested 與 available 秒數。這個限制只影響 temporary raw cache，最終 MP4 仍由 bitrate 與附件大小限制控制。
 
