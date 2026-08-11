@@ -20,7 +20,7 @@
 
 設定資產會建立於 `Assets/Resources/BugReporterSettings.asset`。
 
-`Enable Bug Reporter` 是完整總開關。關閉後不會建立 runtime controller、收集 log 或 rolling video，F6、入口、手勢、`BugReporter.Open()` 與影片錄製 API 也不會啟動 Beacon。若只想隱藏角落按鈕，關閉 `Show Entry Button` 即可；其他已啟用的入口仍可使用。
+`Enable In Build` 只控制 Player build 是否啟用 Beacon；Editor Play Mode 永遠可以使用目前設定進行開發與驗證。Player 關閉此選項後不會建立 runtime controller、收集 log 或 rolling video，F6、入口、手勢、`BugReporter.Open()` 與影片錄製 API 也不會啟動。若只想隱藏角落按鈕，關閉 `Show Entry Button` 即可；其他已啟用的入口仍可使用。
 
 ## Production 隔離
 
@@ -28,7 +28,7 @@
 
 `MACACA_BEACON_PRODUCTION`
 
-這會在編譯期將設定欄位替換為停用的 shell，並停用自動啟動、`BugReporter.Open()` 與影片錄製切換；不需要額外 CI 設定。未加入此 define 時，Editor、Development 與一般測試 build 維持完整 Beacon 行為。
+這會在編譯期將設定欄位替換為停用的 shell，並停用自動啟動、`BugReporter.Open()` 與影片錄製切換；不需要額外 CI 設定。未加入此 define 時，Editor 維持完整 Beacon 行為，Player 則依 `Enable In Build` 決定是否啟用。
 
 `Appearance` 預設使用全螢幕並將介面縮放設為 1.25，寬螢幕採左右雙欄，小尺寸 Game View 自動切換成可捲動單欄。關閉 `Fullscreen` 後會改用置中視窗，並可調整背景遮罩透明度與桌面視窗寬度比例。
 
@@ -131,7 +131,7 @@ public sealed class GameBugContext : IBugReportDataProvider
 BugReporter.RegisterDataProvider(new GameBugContext());
 ```
 
-啟用 `Enable Bug Reporter` 後，也可手動呼叫 `BugReporter.Open()`，或用 `BugReporter.SetTransport(customTransport)` 注入任何 `IBugReportTransport`。
+Editor Play Mode 可直接呼叫 `BugReporter.Open()`；Player 則需啟用 `Enable In Build`。也可用 `BugReporter.SetTransport(customTransport)` 注入任何 `IBugReportTransport`。
 
 Rolling video 也提供 runtime API，可在遊戲內依效能或隱私需求切換；切換不會修改 Settings asset：
 

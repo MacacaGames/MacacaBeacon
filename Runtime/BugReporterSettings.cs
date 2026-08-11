@@ -30,7 +30,7 @@ namespace MacacaGames.RuntimeBugReporter
         // Keep the asset type and runtime API available in Production, but do
         // not compile or serialize any project-specific Beacon configuration.
         // These properties are intentionally non-serialized shell values.
-        public bool enableBugReporter => false;
+        public bool enableInBuild => false;
         public KeyCode shortcut => KeyCode.None;
         public bool allowEscapeToClose => false;
         public bool fullscreen => false;
@@ -70,7 +70,9 @@ namespace MacacaGames.RuntimeBugReporter
 #else
         [Header("Activation")]
         [FormerlySerializedAs("enabledInBuild")]
-        public bool enableBugReporter = true;
+        [FormerlySerializedAs("enableBugReporter")]
+        [Tooltip("Enable Macaca Beacon in Player builds. Editor Play Mode remains enabled for testing.")]
+        public bool enableInBuild = true;
         public KeyCode shortcut = KeyCode.F6;
         public bool allowEscapeToClose = true;
 
@@ -142,8 +144,10 @@ namespace MacacaGames.RuntimeBugReporter
 #endif
 
 #if MACACA_BEACON_PRODUCTION
-        [Obsolete("Use enableBugReporter instead.")]
-        public bool enabledInBuild => enableBugReporter;
+        [Obsolete("Use enableInBuild instead.")]
+        public bool enabledInBuild => enableInBuild;
+        [Obsolete("Use enableInBuild instead.")]
+        public bool enableBugReporter => enableInBuild;
         [Obsolete("Use showEntryButton instead.")]
         public bool mobileEntryButton => showEntryButton;
         [Obsolete("Use mobileEntryButtonSize instead.")]
@@ -159,8 +163,10 @@ namespace MacacaGames.RuntimeBugReporter
         public MobileEntryCorner mobileEntryCorner => (MobileEntryCorner)entryButtonCorner;
 #pragma warning restore 0618
 #else
-        [Obsolete("Use enableBugReporter instead.")]
-        public bool enabledInBuild { get => enableBugReporter; set => enableBugReporter = value; }
+        [Obsolete("Use enableInBuild instead.")]
+        public bool enabledInBuild { get => enableInBuild; set => enableInBuild = value; }
+        [Obsolete("Use enableInBuild instead.")]
+        public bool enableBugReporter { get => enableInBuild; set => enableInBuild = value; }
         [Obsolete("Use showEntryButton instead.")]
         public bool mobileEntryButton { get => showEntryButton; set => showEntryButton = value; }
         [Obsolete("Use mobileEntryButtonSize instead.")]

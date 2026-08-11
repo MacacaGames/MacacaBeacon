@@ -48,73 +48,68 @@ namespace MacacaGames.RuntimeBugReporter.Editor
             EditorGUILayout.HelpBox("Macaca Beacon is disabled by MACACA_BEACON_PRODUCTION for the current build target.", MessageType.Info);
 #else
             Section("Activation");
-            var enableBugReporter = Property("enableBugReporter");
-            EditorGUILayout.PropertyField(enableBugReporter);
+            EditorGUILayout.PropertyField(Property("enableInBuild"));
+            EditorGUILayout.PropertyField(Property("shortcut"));
+            EditorGUILayout.PropertyField(Property("allowEscapeToClose"));
 
-            using (new EditorGUI.DisabledScope(!enableBugReporter.boolValue))
+            Section("Appearance");
+            var fullscreen = Property("fullscreen");
+            EditorGUILayout.PropertyField(fullscreen);
+            EditorGUILayout.PropertyField(Property("backdropOpacity"));
+            EditorGUILayout.PropertyField(Property("interfaceScale"));
+            using (new EditorGUI.DisabledScope(fullscreen.boolValue))
+                EditorGUILayout.PropertyField(Property("desktopWidthRatio"));
+
+            Section("Entry Button");
+            var showEntryButton = Property("showEntryButton");
+            EditorGUILayout.PropertyField(showEntryButton);
+            using (new EditorGUI.DisabledScope(!showEntryButton.boolValue))
             {
-                EditorGUILayout.PropertyField(Property("shortcut"));
-                EditorGUILayout.PropertyField(Property("allowEscapeToClose"));
-
-                Section("Appearance");
-                var fullscreen = Property("fullscreen");
-                EditorGUILayout.PropertyField(fullscreen);
-                EditorGUILayout.PropertyField(Property("backdropOpacity"));
-                EditorGUILayout.PropertyField(Property("interfaceScale"));
-                using (new EditorGUI.DisabledScope(fullscreen.boolValue))
-                    EditorGUILayout.PropertyField(Property("desktopWidthRatio"));
-
-                Section("Entry Button");
-                var showEntryButton = Property("showEntryButton");
-                EditorGUILayout.PropertyField(showEntryButton);
-                using (new EditorGUI.DisabledScope(!showEntryButton.boolValue))
-                {
-                    EditorGUILayout.PropertyField(Property("entryButtonCorner"));
-                    EditorGUILayout.PropertyField(Property("desktopEntryButtonSize"));
-                    EditorGUILayout.PropertyField(Property("mobileEntryButtonSize"));
-                    EditorGUILayout.PropertyField(Property("entryButtonOpacity"));
-                }
-
-                Section("Mobile Gesture");
-                var enableThreeFingerGesture = Property("enableThreeFingerGesture");
-                EditorGUILayout.PropertyField(enableThreeFingerGesture);
-                using (new EditorGUI.DisabledScope(!enableThreeFingerGesture.boolValue))
-                    EditorGUILayout.PropertyField(Property("threeFingerGestureHoldSeconds"));
-
-                Section("Slack");
-                var botToken = Property("botToken");
-                botToken.stringValue = EditorGUILayout.PasswordField(new GUIContent(botToken.displayName, botToken.tooltip), botToken.stringValue);
-                EditorGUILayout.PropertyField(Property("channelId"));
-
-                Section("Capture");
-                EditorGUILayout.PropertyField(Property("includeScreenshot"));
-                EditorGUILayout.PropertyField(Property("includeDiagnostics"));
-                EditorGUILayout.PropertyField(Property("includeRecentLogs"));
-                EditorGUILayout.PropertyField(Property("screenshotJpegQuality"));
-                EditorGUILayout.PropertyField(Property("maximumLogEntries"));
-
-                Section("Rolling Video");
-                EditorGUILayout.PropertyField(Property("enableRollingVideo"));
-                EditorGUILayout.PropertyField(Property("preferMp4"));
-                EditorGUILayout.PropertyField(Property("allowLegacyAviFallback"));
-                EditorGUILayout.PropertyField(Property("videoFramesPerSecond"));
-                EditorGUILayout.PropertyField(Property("secondsBefore"));
-                EditorGUILayout.PropertyField(Property("secondsAfter"));
-                EditorGUILayout.PropertyField(Property("videoWidth"));
-                EditorGUILayout.PropertyField(Property("videoJpegQuality"));
-                EditorGUILayout.PropertyField(Property("videoBitrateKbps"));
-                EditorGUILayout.PropertyField(Property("maximumVideoCacheMegabytes"));
-                EditorGUILayout.PropertyField(Property("maximumAttachmentMegabytes"));
-
-                Section("Local Fallback");
-                EditorGUILayout.PropertyField(Property("saveFailedReportsLocally"));
-                EditorGUILayout.PropertyField(Property("maximumRetainedLocalReports"));
-
-                Section("Form");
-                EditorGUILayout.PropertyField(Property("reportTitle"));
-                EditorGUILayout.PropertyField(Property("privacyNotice"));
-                EditorGUILayout.PropertyField(Property("categories"), true);
+                EditorGUILayout.PropertyField(Property("entryButtonCorner"));
+                EditorGUILayout.PropertyField(Property("desktopEntryButtonSize"));
+                EditorGUILayout.PropertyField(Property("mobileEntryButtonSize"));
+                EditorGUILayout.PropertyField(Property("entryButtonOpacity"));
             }
+
+            Section("Mobile Gesture");
+            var enableThreeFingerGesture = Property("enableThreeFingerGesture");
+            EditorGUILayout.PropertyField(enableThreeFingerGesture);
+            using (new EditorGUI.DisabledScope(!enableThreeFingerGesture.boolValue))
+                EditorGUILayout.PropertyField(Property("threeFingerGestureHoldSeconds"));
+
+            Section("Slack");
+            var botToken = Property("botToken");
+            botToken.stringValue = EditorGUILayout.PasswordField(new GUIContent(botToken.displayName, botToken.tooltip), botToken.stringValue);
+            EditorGUILayout.PropertyField(Property("channelId"));
+
+            Section("Capture");
+            EditorGUILayout.PropertyField(Property("includeScreenshot"));
+            EditorGUILayout.PropertyField(Property("includeDiagnostics"));
+            EditorGUILayout.PropertyField(Property("includeRecentLogs"));
+            EditorGUILayout.PropertyField(Property("screenshotJpegQuality"));
+            EditorGUILayout.PropertyField(Property("maximumLogEntries"));
+
+            Section("Rolling Video");
+            EditorGUILayout.PropertyField(Property("enableRollingVideo"));
+            EditorGUILayout.PropertyField(Property("preferMp4"));
+            EditorGUILayout.PropertyField(Property("allowLegacyAviFallback"));
+            EditorGUILayout.PropertyField(Property("videoFramesPerSecond"));
+            EditorGUILayout.PropertyField(Property("secondsBefore"));
+            EditorGUILayout.PropertyField(Property("secondsAfter"));
+            EditorGUILayout.PropertyField(Property("videoWidth"));
+            EditorGUILayout.PropertyField(Property("videoJpegQuality"));
+            EditorGUILayout.PropertyField(Property("videoBitrateKbps"));
+            EditorGUILayout.PropertyField(Property("maximumVideoCacheMegabytes"));
+            EditorGUILayout.PropertyField(Property("maximumAttachmentMegabytes"));
+
+            Section("Local Fallback");
+            EditorGUILayout.PropertyField(Property("saveFailedReportsLocally"));
+            EditorGUILayout.PropertyField(Property("maximumRetainedLocalReports"));
+
+            Section("Form");
+            EditorGUILayout.PropertyField(Property("reportTitle"));
+            EditorGUILayout.PropertyField(Property("privacyNotice"));
+            EditorGUILayout.PropertyField(Property("categories"), true);
 #endif
             serializedSettings.ApplyModifiedProperties();
         }

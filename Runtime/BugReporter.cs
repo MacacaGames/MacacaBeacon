@@ -116,8 +116,10 @@ namespace MacacaGames.RuntimeBugReporter
 
         internal static bool IsEnabled(BugReporterSettings settings)
         {
-            return settings != null && settings.enableBugReporter;
+            return settings != null && ShouldEnable(Application.isEditor, settings.enableInBuild);
         }
+
+        internal static bool ShouldEnable(bool isEditor, bool enableInBuild) => isEditor || enableInBuild;
 
         private static bool EnsureController(BugReporterSettings settings = null)
         {
