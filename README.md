@@ -40,7 +40,7 @@
 2. 將 `Bot Token` 與目標 `Channel ID` 填入 Macaca Beacon Settings。
 3. 邀請該 App 加入目標 channel。
 
-主回報固定由 Bot 使用 `chat.postMessage` 發送並取得父訊息 `ts`；附件再依 Slack 官方流程走 `files.getUploadURLExternal` → 檔案位元組上傳 → 帶有 `thread_ts` 的 `files.completeUploadExternal`，因此截圖、影片與 diagnostics 都位於主回報的 Thread。套件不使用 Incoming Webhook。
+主回報固定由 Bot 使用 `chat.postMessage` 發送並取得父訊息 `ts`；主訊息第一行固定為 `🐒 [BugReport]`，第二行顯示 `【Category】`、標題與描述，方便 Slack 自動化使用文字條件觸發。請固定比對 `[BugReport]`，不要依賴 emoji。完整的 ID、分類、建置、場景、時間、裝置資訊與自訂欄位會另發到該回報的 Thread。附件再依 Slack 官方流程走 `files.getUploadURLExternal` → 檔案位元組上傳 → 帶有 `thread_ts` 的 `files.completeUploadExternal`，因此截圖、影片與 diagnostics 也都位於主回報的 Thread。套件不使用 Incoming Webhook。
 
 > 安全性：Bot Token 放進 Player 後可被擷取。僅建議內部／受信任測試使用。公開玩家版本應實作自己的 rate-limited relay，並以 `BugReporter.SetTransport(...)` 替換內建 transport；不要把 Slack secret 發佈給玩家。
 
