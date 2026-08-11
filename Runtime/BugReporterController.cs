@@ -106,6 +106,7 @@ namespace MacacaGames.RuntimeBugReporter
         private Texture2D softwareCursorTexture;
         private float styleScale = -1f;
         private GUIStyle entryButtonStyle;
+        private GUIStyle entryShortcutStyle;
 #if UNITY_IOS || UNITY_ANDROID
         private float mobileGestureStartedAt = -1f;
         private bool mobileGestureTriggered;
@@ -873,6 +874,16 @@ namespace MacacaGames.RuntimeBugReporter
                 top ? safeArea.yMin + margin : safeArea.yMax - size - margin,
                 size,
                 size);
+        }
+
+        internal static Rect GetEntryShortcutRect(Rect buttonRect, float width, float gap, EntryButtonCorner corner)
+        {
+            var left = corner == EntryButtonCorner.TopLeft || corner == EntryButtonCorner.BottomLeft;
+            return new Rect(
+                left ? buttonRect.xMax + gap : buttonRect.xMin - gap - width,
+                buttonRect.y,
+                width,
+                buttonRect.height);
         }
 
         private Rect GetSafeAreaGuiRect()
@@ -2053,6 +2064,19 @@ namespace MacacaGames.RuntimeBugReporter
             entryButtonStyle.fontSize = Mathf.RoundToInt((UsesMobileEntryLayout() ? 24 : 18) * scale);
             entryButtonStyle.margin = new RectOffset(0, 0, 0, 0);
             entryButtonStyle.padding = new RectOffset(0, 0, 0, 0);
+
+            entryShortcutStyle = new GUIStyle(entryButtonStyle)
+            {
+                fontSize = Mathf.RoundToInt(13 * scale)
+            };
+            entryShortcutStyle.normal.background = secondary;
+            entryShortcutStyle.hover.background = secondary;
+            entryShortcutStyle.active.background = secondary;
+            entryShortcutStyle.focused.background = secondary;
+            entryShortcutStyle.normal.textColor = ink;
+            entryShortcutStyle.hover.textColor = ink;
+            entryShortcutStyle.active.textColor = ink;
+            entryShortcutStyle.focused.textColor = ink;
         }
 
         private static bool UsesMobileEntryLayout()
@@ -2071,10 +2095,20 @@ namespace MacacaGames.RuntimeBugReporter
             var baseSize = SelectEntryButtonBaseSize(mobile, settings.desktopEntryButtonSize, settings.mobileEntryButtonSize);
             var size = Mathf.Clamp(baseSize * styleScale, mobile ? 48f : 32f, mobile ? 112f : 80f);
             var margin = Mathf.Max(10f, 14f * styleScale);
-            var rect = GetEntryButtonRect(ToGuiSafeArea(Screen.safeArea, Screen.height), size, margin, settings.entryButtonCorner);
+            var safeArea = ToGuiSafeArea(Screen.safeArea, Screen.height);
+            var rect = GetEntryButtonRect(safeArea, size, margin, settings.entryButtonCorner);
 
             var previousColor = GUI.color;
             GUI.color = new Color(1f, 1f, 1f, settings.entryButtonOpacity);
+            if (!mobile)
+            {
+                var shortcut = settings.shortcut.ToString();
+                var gap = 6f * styleScale;
+                var desiredWidth = Mathf.Max(size, entryShortcutStyle.CalcSize(new GUIContent(shortcut)).x + 16f * styleScale);
+                var width = Mathf.Min(desiredWidth, Mathf.Max(0f, safeArea.width - margin * 2f - size - gap));
+                if (width > 0f)
+                    GUI.Label(GetEntryShortcutRect(rect, width, gap, settings.entryButtonCorner), shortcut, entryShortcutStyle);
+            }
             if (GUI.Button(rect, "!", entryButtonStyle))
             {
                 RequestOpen();
