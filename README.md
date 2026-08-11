@@ -34,6 +34,19 @@
 
 跨平台角落入口位於 `Entry Button`：桌面與手機分別設定基礎尺寸，並共用透明度與角落位置。按鈕會把 `Screen.safeArea` 轉為 IMGUI 座標後避開瀏海與 Home indicator，只有指標或觸控落在按鈕自己的矩形內時才會攔截事件。三指設定獨立放在 `Mobile Gesture`，不受 `Show Entry Button` 影響。
 
+## 軟體游標與掌機
+
+桌面遊戲若在 BugReporter 開啟期間隱藏或鎖定 Unity Cursor，回報頁面會用 IMGUI 繪製自己的軟體游標，並以同一位置處理 hover、點擊、拖曳、截圖標注與影片 seek。專案有安裝 Input System 時，locked 模式會透過條件式 adapter 讀取 `Mouse.current.delta`；未安裝時仍可編譯並使用 IMGUI delta fallback。BugReporter 不會寫入或還原 `Cursor.visible`／`Cursor.lockState`，也不會暫停遊戲或攔截專案直接讀取的滑鼠輸入。
+
+iOS／Android、Unity 回報為 `DeviceType.Handheld` 或 `DeviceType.Console` 的裝置不會啟用桌面軟體游標。Steam Deck 等可能被 Unity 分類為 Desktop 的掌機，由宿主使用既有平台判斷後關閉；這個呼叫不會建立 BugReporter controller，也不會讓套件相依 Steamworks：
+
+```csharp
+using MacacaGames.RuntimeBugReporter;
+
+// 由宿主既有的平台層判斷 Steam Deck／其他掌機後呼叫。
+BugReporter.SetSoftwareCursorEnabled(false);
+```
+
 ## Slack 設定
 
 1. 建立 Slack App，替 Bot 加入 `chat:write` 與 `files:write` scopes，然後安裝／重新安裝 App。

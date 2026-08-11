@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added an IMGUI software cursor with resolution-consistent apparent size and movement for hidden or locked desktop pointers without changing Unity cursor state, using an optional Input System raw-delta adapter, automatic mobile/handheld/console exclusions, and a Steamworks-independent runtime opt-out for PC handhelds.
 - Added IMGUI Screenshot and Video review tabs with API-only `VideoPlayer` playback, click/tap play-pause, and a draggable in-frame timeline for finalized H.264 MP4 incident files.
 - Added a per-report video inclusion toggle and explicit preparing, unavailable, and preview-unsupported states.
 - Made video inclusion a prominent full-row ON/OFF toggle and removed selection-like hover feedback from non-interactive report text.

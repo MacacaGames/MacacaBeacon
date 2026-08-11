@@ -23,6 +23,17 @@ namespace MacacaGames.RuntimeBugReporter
         private static readonly string[] AnnotationSizeLabels = { "S", "M", "L" };
         private static readonly string[] CaptureTabLabels = { "SCREENSHOT", "VIDEO" };
         private static readonly int VideoSeekControlHash = "MacacaBeaconVideoSeek".GetHashCode();
+        internal static Func<Vector2> SoftwareCursorDeltaReader;
+        internal static Func<SoftwareCursorButtonState> SoftwareCursorButtonReader;
+
+        [Flags]
+        internal enum SoftwareCursorButtonState
+        {
+            None = 0,
+            Pressed = 1,
+            Released = 2,
+            Held = 4
+        }
 
         internal static BugReporterController Instance { get; private set; }
         internal bool IsOpen { get; private set; }
@@ -60,8 +71,15 @@ namespace MacacaGames.RuntimeBugReporter
         private int touchScrollTarget;
         private Vector2 lastTouchScrollPosition;
         private Rect windowRect;
-        private CursorLockMode previousCursorLock;
-        private bool previousCursorVisible;
+        private Vector2 softwareCursorPosition;
+        private bool softwareCursorInitialized;
+        private int softwareCursorDeltaFrame = -1;
+        private SoftwareCursorButtonState softwareCursorButtonState;
+        private int softwareCursorButtonFrame = -1;
+        private int softwareCursorPressedControl;
+        private string softwareCursorFocusedTextControl;
+        private int softwareCursorFocusedTextControlId;
+        private double? softwareCursorVideoPreviewTime;
         private GUIStyle titleStyle;
         private GUIStyle subtitleStyle;
         private GUIStyle labelStyle;
@@ -81,6 +99,7 @@ namespace MacacaGames.RuntimeBugReporter
         private Texture2D windowTexture;
         private Texture2D accentTexture;
         private Texture2D fieldTexture;
+        private Texture2D softwareCursorTexture;
         private float styleScale = -1f;
         private GUIStyle entryButtonStyle;
 #if UNITY_IOS || UNITY_ANDROID
@@ -96,6 +115,8 @@ namespace MacacaGames.RuntimeBugReporter
         private const float DesktopLayoutMinimumWidth = 1120f;
         private const float MobileLayoutMaximumWidth = 720f;
         private const float HorizontalAnnotationToolbarMinimumWidth = 620f;
+        // Locked mouse delta does not include the desktop cursor's acceleration.
+        private const float LockedSoftwareCursorSpeed = 4f;
 
         internal void Initialize(BugReporterSettings value)
         {
@@ -123,8 +144,14 @@ namespace MacacaGames.RuntimeBugReporter
             videoCapture = null;
             captureTabIndex = 0;
             includeVideoInReport = false;
-            Cursor.lockState = previousCursorLock;
-            Cursor.visible = previousCursorVisible;
+            softwareCursorInitialized = false;
+            softwareCursorDeltaFrame = -1;
+            softwareCursorButtonState = SoftwareCursorButtonState.None;
+            softwareCursorButtonFrame = -1;
+            softwareCursorPressedControl = 0;
+            softwareCursorFocusedTextControl = null;
+            softwareCursorFocusedTextControlId = 0;
+            softwareCursorVideoPreviewTime = null;
             status = "";
         }
 
@@ -265,12 +292,16 @@ namespace MacacaGames.RuntimeBugReporter
                 });
             }
 
-            previousCursorLock = Cursor.lockState;
-            previousCursorVisible = Cursor.visible;
-            Cursor.lockState = CursorLockMode.None;
-            Cursor.visible = true;
             isOpening = false;
             IsOpen = true;
+            softwareCursorInitialized = false;
+            softwareCursorDeltaFrame = -1;
+            softwareCursorButtonState = SoftwareCursorButtonState.None;
+            softwareCursorButtonFrame = -1;
+            softwareCursorPressedControl = 0;
+            softwareCursorFocusedTextControl = null;
+            softwareCursorFocusedTextControlId = 0;
+            softwareCursorVideoPreviewTime = null;
             SetInputBlocker(true);
             pendingFocusControl = "BugReportTitle";
             status = !videoCaptureCompleted && videoCaptureRequested && settings.secondsAfter > 0
@@ -295,6 +326,36 @@ namespace MacacaGames.RuntimeBugReporter
                 DrawEntryButton();
             if (!IsOpen)
                 return;
+
+            if (!IsSoftwareCursorActive())
+            {
+                softwareCursorInitialized = false;
+                softwareCursorDeltaFrame = -1;
+                softwareCursorButtonState = SoftwareCursorButtonState.None;
+                softwareCursorButtonFrame = -1;
+                softwareCursorPressedControl = 0;
+                softwareCursorFocusedTextControl = null;
+                softwareCursorFocusedTextControlId = 0;
+                softwareCursorVideoPreviewTime = null;
+                DrawOpenReporter(current);
+                return;
+            }
+
+            UpdateSoftwareCursor(current);
+            PrepareSoftwareCursorButtonState(current);
+            try
+            {
+                DrawOpenReporter(current);
+                DrawSoftwareCursor(current);
+            }
+            finally
+            {
+                FinishSoftwareCursorButtonState();
+            }
+        }
+
+        private void DrawOpenReporter(Event current)
+        {
             if (settings.allowEscapeToClose && current.type == EventType.KeyDown && current.keyCode == KeyCode.Escape)
             {
                 Close();
@@ -355,16 +416,293 @@ namespace MacacaGames.RuntimeBugReporter
             }
             HandleScrollInput();
             GUI.color = Color.white;
-            windowRect = GUILayout.Window(GetInstanceID(), windowRect, DrawWindow, GUIContent.none, GUIStyle.none, GUILayout.Width(width), GUILayout.Height(height));
+            GUILayout.BeginArea(windowRect);
+            DrawWindow();
+            GUILayout.EndArea();
+        }
 
-            if (!string.IsNullOrEmpty(pendingFocusControl) && Event.current.type == EventType.Repaint)
+        internal static bool IsSoftwareCursorPlatform(bool isMobilePlatform, DeviceType deviceType)
+        {
+            return !isMobilePlatform && deviceType != DeviceType.Handheld && deviceType != DeviceType.Console;
+        }
+
+        private static bool IsSoftwareCursorActive()
+        {
+            return ShouldUseSoftwareCursor(
+                BugReporter.SoftwareCursorEnabled,
+                IsSoftwareCursorPlatform(Application.isMobilePlatform, SystemInfo.deviceType),
+                Cursor.visible,
+                Cursor.lockState);
+        }
+
+        internal static bool ShouldUseSoftwareCursor(
+            bool runtimeEnabled,
+            bool platformEligible,
+            bool cursorVisible,
+            CursorLockMode lockMode)
+        {
+            return runtimeEnabled && platformEligible && (!cursorVisible || lockMode == CursorLockMode.Locked);
+        }
+
+        internal static Vector2 NextSoftwareCursorPosition(
+            bool locked,
+            bool initialized,
+            Vector2 currentPosition,
+            Vector2 nativePosition,
+            Vector2 relativeDelta,
+            Rect bounds,
+            Vector2 visualSize)
+        {
+            var position = locked
+                ? (initialized ? currentPosition : bounds.center) + relativeDelta
+                : nativePosition;
+            return new Vector2(
+                Mathf.Clamp(position.x, bounds.xMin, Mathf.Max(bounds.xMin, bounds.xMax - visualSize.x)),
+                Mathf.Clamp(position.y, bounds.yMin, Mathf.Max(bounds.yMin, bounds.yMax - visualSize.y)));
+        }
+
+        private void UpdateSoftwareCursor(Event current)
+        {
+            var bounds = windowRect.width > 1f && windowRect.height > 1f
+                ? windowRect
+                : new Rect(0f, 0f, Screen.width, Screen.height);
+            var locked = Cursor.lockState == CursorLockMode.Locked;
+            var relativeDelta = Vector2.zero;
+            if (locked && softwareCursorDeltaFrame != Time.frameCount)
             {
-                GUI.FocusControl(pendingFocusControl);
-                pendingFocusControl = null;
+                relativeDelta = SoftwareCursorDeltaReader != null
+                    ? SoftwareCursorDeltaReader()
+                    : current.delta;
+                relativeDelta *= LockedSoftwareCursorSpeed * SoftwareCursorTravelScale(bounds.width, bounds.height);
+                softwareCursorDeltaFrame = Time.frameCount;
+            }
+            softwareCursorPosition = NextSoftwareCursorPosition(
+                locked,
+                softwareCursorInitialized,
+                softwareCursorPosition,
+                current.mousePosition,
+                relativeDelta,
+                bounds,
+                SoftwareCursorVisualSize(bounds.width, bounds.height));
+            softwareCursorInitialized = true;
+        }
+
+        private void PrepareSoftwareCursorButtonState(Event current)
+        {
+            softwareCursorButtonState = SoftwareCursorButtonState.None;
+            if (SoftwareCursorButtonReader != null)
+            {
+                if (current.type != EventType.Repaint || softwareCursorButtonFrame == Time.frameCount)
+                    return;
+
+                softwareCursorButtonState = SoftwareCursorButtonReader();
+                softwareCursorButtonFrame = Time.frameCount;
+            }
+            else if (current.button == 0)
+            {
+                if (current.type == EventType.MouseDown)
+                    softwareCursorButtonState = SoftwareCursorButtonState.Pressed | SoftwareCursorButtonState.Held;
+                else if (current.type == EventType.MouseDrag)
+                    softwareCursorButtonState = SoftwareCursorButtonState.Held;
+                else if (current.type == EventType.MouseUp)
+                    softwareCursorButtonState = SoftwareCursorButtonState.Released;
+            }
+
+            if ((softwareCursorButtonState & SoftwareCursorButtonState.Pressed) != 0)
+            {
+                softwareCursorPressedControl = 0;
+                softwareCursorFocusedTextControl = null;
+                softwareCursorFocusedTextControlId = 0;
+                softwareCursorVideoPreviewTime = null;
+                GUIUtility.keyboardControl = 0;
             }
         }
 
-        private void DrawWindow(int id)
+        private void FinishSoftwareCursorButtonState()
+        {
+            if ((softwareCursorButtonState & SoftwareCursorButtonState.Released) != 0)
+                softwareCursorPressedControl = 0;
+            softwareCursorButtonState = SoftwareCursorButtonState.None;
+        }
+
+        private bool HandleSoftwareCursorClick(int controlId, Rect rect)
+        {
+            if (!IsSoftwareCursorActive())
+                return false;
+
+            var hovered = SoftwareCursorContains(rect);
+            if ((softwareCursorButtonState & SoftwareCursorButtonState.Pressed) != 0
+                && softwareCursorPressedControl == 0
+                && GUI.enabled
+                && hovered)
+            {
+                softwareCursorPressedControl = controlId;
+            }
+
+            return (softwareCursorButtonState & SoftwareCursorButtonState.Released) != 0
+                && softwareCursorPressedControl == controlId
+                && GUI.enabled
+                && hovered;
+        }
+
+        private bool SoftwareCursorContains(Rect rect)
+        {
+            var screenRect = new Rect(GUIUtility.GUIToScreenPoint(rect.position), rect.size);
+            return screenRect.Contains(softwareCursorPosition);
+        }
+
+        private bool SoftwareCursorButton(string label, GUIStyle style, params GUILayoutOption[] options)
+        {
+            if (!IsSoftwareCursorActive())
+                return GUILayout.Button(label, style, options);
+
+            var content = new GUIContent(label);
+            var rect = GUILayoutUtility.GetRect(content, style, options);
+            var controlId = GUIUtility.GetControlID(FocusType.Passive, rect);
+            var hovered = SoftwareCursorContains(rect);
+            var active = softwareCursorPressedControl == controlId;
+            if (Event.current.type == EventType.Repaint)
+                style.Draw(rect, content, hovered, active, false, false);
+            return HandleSoftwareCursorClick(controlId, rect);
+        }
+
+        private bool SoftwareCursorToggle(bool value, string label, GUIStyle style, params GUILayoutOption[] options)
+        {
+            if (!IsSoftwareCursorActive())
+                return GUILayout.Toggle(value, label, style, options);
+
+            var content = new GUIContent(label);
+            var rect = GUILayoutUtility.GetRect(content, style, options);
+            var controlId = GUIUtility.GetControlID(FocusType.Passive, rect);
+            var hovered = SoftwareCursorContains(rect);
+            var active = softwareCursorPressedControl == controlId;
+            if (Event.current.type == EventType.Repaint)
+                style.Draw(rect, content, hovered, active, value, false);
+            return HandleSoftwareCursorClick(controlId, rect) ? !value : value;
+        }
+
+        private int SoftwareCursorSelectionGrid(
+            int selected,
+            string[] labels,
+            int columns,
+            GUIStyle style,
+            params GUILayoutOption[] options)
+        {
+            if (!IsSoftwareCursorActive())
+                return GUILayout.SelectionGrid(selected, labels, columns, style, options);
+
+            var rect = GUILayoutUtility.GetRect(GUIContent.none, style, options);
+            var rows = Mathf.CeilToInt(labels.Length / (float)columns);
+            var cellWidth = rect.width / columns;
+            var cellHeight = rect.height / rows;
+            for (var index = 0; index < labels.Length; index++)
+            {
+                var cellRect = new Rect(
+                    rect.x + index % columns * cellWidth,
+                    rect.y + index / columns * cellHeight,
+                    cellWidth,
+                    cellHeight);
+                var controlId = GUIUtility.GetControlID(FocusType.Passive, cellRect);
+                if (Event.current.type == EventType.Repaint)
+                {
+                    style.Draw(
+                        cellRect,
+                        new GUIContent(labels[index]),
+                        SoftwareCursorContains(cellRect),
+                        softwareCursorPressedControl == controlId,
+                        index == selected,
+                        false);
+                }
+                if (HandleSoftwareCursorClick(controlId, cellRect))
+                    return index;
+            }
+            return selected;
+        }
+
+        private void FocusSoftwareCursorControl(string controlName, Rect rect)
+        {
+            var eventType = Event.current.type;
+            var focusRequested = pendingFocusControl == controlName && eventType == EventType.Repaint;
+            if (focusRequested)
+                pendingFocusControl = null;
+
+            if (!IsSoftwareCursorActive())
+            {
+                if (focusRequested)
+                    GUI.FocusControl(controlName);
+                return;
+            }
+
+            var controlId = GUIUtility.GetControlID(controlName.GetHashCode(), FocusType.Passive, rect);
+            HandleSoftwareCursorClick(controlId, rect);
+            focusRequested |= softwareCursorPressedControl == controlId
+                && (softwareCursorButtonState & SoftwareCursorButtonState.Pressed) != 0;
+            if (focusRequested)
+            {
+                softwareCursorFocusedTextControl = controlName;
+                GUI.FocusControl(controlName);
+                softwareCursorFocusedTextControlId = GUIUtility.keyboardControl;
+                return;
+            }
+
+            if (softwareCursorFocusedTextControl != controlName || !ShouldRefreshSoftwareCursorTextFocus(eventType))
+                return;
+
+            GUI.FocusControl(controlName);
+            if (GUIUtility.keyboardControl != 0)
+                softwareCursorFocusedTextControlId = GUIUtility.keyboardControl;
+        }
+
+        private void RestoreSoftwareCursorTextFocus(string controlName)
+        {
+            if (IsSoftwareCursorActive()
+                && softwareCursorFocusedTextControl == controlName
+                && softwareCursorFocusedTextControlId != 0)
+            {
+                GUIUtility.keyboardControl = softwareCursorFocusedTextControlId;
+            }
+        }
+
+        internal static bool ShouldRefreshSoftwareCursorTextFocus(EventType eventType)
+        {
+            return eventType == EventType.Layout;
+        }
+
+        internal static float SoftwareCursorTravelScale(float boundsWidth, float boundsHeight)
+        {
+            return Mathf.Min(
+                Mathf.Max(1f, boundsWidth) / 1920f,
+                Mathf.Max(1f, boundsHeight) / 1080f);
+        }
+
+        internal static Vector2 SoftwareCursorVisualSize(float boundsWidth, float boundsHeight)
+        {
+            var scale = SoftwareCursorTravelScale(boundsWidth, boundsHeight);
+            return new Vector2(12f * scale, 16f * scale);
+        }
+
+        private void DrawSoftwareCursor(Event current)
+        {
+            if (!IsOpen || current.type != EventType.Repaint || softwareCursorTexture == null)
+                return;
+
+            var previousColor = GUI.color;
+            var previousDepth = GUI.depth;
+            GUI.color = Color.white;
+            GUI.depth = -10001;
+            GUI.DrawTexture(new Rect(
+                softwareCursorPosition,
+                SoftwareCursorVisualSize(windowRect.width, windowRect.height)), softwareCursorTexture);
+            GUI.depth = previousDepth;
+            GUI.color = previousColor;
+        }
+
+        private void DrawWindow()
+        {
+            DrawWindowContents();
+        }
+
+        private void DrawWindowContents()
         {
             GUI.DrawTexture(new Rect(0, 0, windowRect.width, windowRect.height), windowTexture);
             GUI.DrawTexture(new Rect(0, 0, Mathf.Max(4f, 4f * styleScale), windowRect.height), accentTexture);
@@ -381,7 +719,7 @@ namespace MacacaGames.RuntimeBugReporter
             if (!IsMobileLayout())
                 GUILayout.Label(settings.shortcut + "  toggle", hintStyle, GUILayout.Width(88 * styleScale));
             GUI.enabled = !isSending;
-            if (GUILayout.Button("CLOSE", closeButtonStyle, GUILayout.Width(82 * styleScale), GUILayout.Height(44 * styleScale)))
+            if (SoftwareCursorButton("CLOSE", closeButtonStyle, GUILayout.Width(82 * styleScale), GUILayout.Height(44 * styleScale)))
                 Close();
             GUI.enabled = true;
             GUILayout.Space(28 * styleScale);
@@ -417,21 +755,21 @@ namespace MacacaGames.RuntimeBugReporter
             if (IsMobileLayout())
             {
                 var mobileButtonWidth = (windowRect.width - footerPadding * 2f - 8f * styleScale) * 0.5f;
-                if (GUILayout.Button("CANCEL", buttonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(mobileButtonWidth)))
+                if (SoftwareCursorButton("CANCEL", buttonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(mobileButtonWidth)))
                     Close();
                 GUI.enabled = canSend;
-                if (GUILayout.Button(sendLabel, primaryButtonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(mobileButtonWidth)))
+                if (SoftwareCursorButton(sendLabel, primaryButtonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(mobileButtonWidth)))
                     TryBeginSend();
             }
             else
             {
-                if (GUILayout.Button("CANCEL", buttonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(120 * styleScale)))
+                if (SoftwareCursorButton("CANCEL", buttonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(120 * styleScale)))
                     Close();
                 GUI.enabled = true;
                 GUILayout.FlexibleSpace();
                 GUILayout.Label("Ctrl / Cmd + Enter", hintStyle, GUILayout.Width(142 * styleScale));
                 GUI.enabled = canSend;
-                if (GUILayout.Button(sendLabel, primaryButtonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(190 * styleScale)))
+                if (SoftwareCursorButton(sendLabel, primaryButtonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(190 * styleScale)))
                     TryBeginSend();
             }
             GUI.enabled = true;
@@ -541,7 +879,7 @@ namespace MacacaGames.RuntimeBugReporter
             var current = Event.current;
             if (current.type == EventType.ScrollWheel)
             {
-                var target = GetScrollTarget(current.mousePosition);
+                var target = GetScrollTarget(IsSoftwareCursorActive() ? softwareCursorPosition : current.mousePosition);
                 if (target == 1)
                     contentScroll.y = Mathf.Max(0f, contentScroll.y + current.delta.y * 24f);
                 else if (target == 2)
@@ -632,13 +970,18 @@ namespace MacacaGames.RuntimeBugReporter
         private void DrawCaptureReviewPanel(float previewWidth, float fallbackHeight)
         {
             var previousTab = captureTabIndex;
-            captureTabIndex = GUILayout.Toolbar(
+            captureTabIndex = SoftwareCursorSelectionGrid(
                 captureTabIndex,
                 CaptureTabLabels,
+                CaptureTabLabels.Length,
                 categoryStyle,
                 GUILayout.Height(44f * styleScale));
-            if (previousTab == 1 && captureTabIndex == 0 && videoPlayer != null && videoPlayer.isPlaying)
-                videoPlayer.Pause();
+            if (previousTab == 1 && captureTabIndex == 0)
+            {
+                softwareCursorVideoPreviewTime = null;
+                if (videoPlayer != null && videoPlayer.isPlaying)
+                    videoPlayer.Pause();
+            }
 
             GUILayout.Space(10f * styleScale);
             if (captureTabIndex == 0)
@@ -742,7 +1085,7 @@ namespace MacacaGames.RuntimeBugReporter
             var inclusionLabel = includeVideoInReport
                 ? "[ON]  INCLUDE VIDEO IN THIS REPORT"
                 : "[OFF]  INCLUDE VIDEO IN THIS REPORT";
-            includeVideoInReport = GUILayout.Toggle(
+            includeVideoInReport = SoftwareCursorToggle(
                 includeVideoInReport,
                 inclusionLabel,
                 inclusionToggleStyle,
@@ -764,8 +1107,12 @@ namespace MacacaGames.RuntimeBugReporter
                 4f * styleScale);
             var seekHitRect = new Rect(trackRect.x, overlayRect.y, trackRect.width, 28f * styleScale);
             var seekControlId = GUIUtility.GetControlID(VideoSeekControlHash, FocusType.Passive, seekHitRect);
-            var pointerOverVideo = imageRect.Contains(Event.current.mousePosition);
-            var isSeeking = GUIUtility.hotControl == seekControlId;
+            var pointerOverVideo = IsSoftwareCursorActive()
+                ? SoftwareCursorContains(imageRect)
+                : imageRect.Contains(Event.current.mousePosition);
+            var isSeeking = IsSoftwareCursorActive()
+                ? softwareCursorPressedControl == seekControlId
+                : GUIUtility.hotControl == seekControlId;
             var showControls = !videoPlayer.isPlaying || pointerOverVideo || isSeeking;
 
             if (showControls)
@@ -774,11 +1121,26 @@ namespace MacacaGames.RuntimeBugReporter
                 HandleVideoSeek(seekControlId, seekHitRect, duration);
             }
 
-            var current = Event.current;
-            if (!isSending && current.type == EventType.MouseDown && current.button == 0 && imageRect.Contains(current.mousePosition))
+            if (IsSoftwareCursorActive())
             {
-                ToggleVideoPlayback();
-                current.Use();
+                var videoControlId = GUIUtility.GetControlID("MacacaBeaconVideoPlayback".GetHashCode(), FocusType.Passive, imageRect);
+                if (!isSending && ShouldActivateSoftwareCursorVideoSurface(
+                    softwareCursorButtonState,
+                    softwareCursorPressedControl,
+                    SoftwareCursorContains(imageRect)))
+                {
+                    softwareCursorPressedControl = videoControlId;
+                    ToggleVideoPlayback();
+                }
+            }
+            else
+            {
+                var current = Event.current;
+                if (!isSending && current.type == EventType.MouseDown && current.button == 0 && imageRect.Contains(current.mousePosition))
+                {
+                    ToggleVideoPlayback();
+                    current.Use();
+                }
             }
         }
 
@@ -793,7 +1155,8 @@ namespace MacacaGames.RuntimeBugReporter
             GUI.color = new Color(1f, 1f, 1f, 0.38f);
             GUI.DrawTexture(trackRect, Texture2D.whiteTexture);
 
-            var progress = duration > 0d ? Mathf.Clamp01((float)(videoPlayer.time / duration)) : 0f;
+            var displayedTime = softwareCursorVideoPreviewTime ?? videoPlayer.time;
+            var progress = duration > 0d ? Mathf.Clamp01((float)(displayedTime / duration)) : 0f;
             var playedRect = new Rect(trackRect.x, trackRect.y, trackRect.width * progress, trackRect.height);
             GUI.color = new Color(0.09f, 0.70f, 0.72f, 1f);
             GUI.DrawTexture(playedRect, Texture2D.whiteTexture);
@@ -808,13 +1171,45 @@ namespace MacacaGames.RuntimeBugReporter
                 overlayRect.y + 20f * styleScale,
                 overlayRect.width - 24f * styleScale,
                 22f * styleScale);
-            GUI.Label(timeRect, FormatVideoTime(videoPlayer.time) + " / " + FormatVideoTime(duration), hintStyle);
+            hintStyle.Draw(
+                timeRect,
+                new GUIContent(FormatVideoTime(displayedTime) + " / " + FormatVideoTime(duration)),
+                false,
+                false,
+                false,
+                false);
         }
 
         private void HandleVideoSeek(int controlId, Rect hitRect, double duration)
         {
             if (isSending || !videoPlayer.canSetTime || duration <= 0d)
                 return;
+
+            if (IsSoftwareCursorActive())
+            {
+                var screenRect = new Rect(GUIUtility.GUIToScreenPoint(hitRect.position), hitRect.size);
+                if ((softwareCursorButtonState & SoftwareCursorButtonState.Pressed) != 0
+                    && softwareCursorPressedControl == 0
+                    && screenRect.Contains(softwareCursorPosition))
+                {
+                    softwareCursorPressedControl = controlId;
+                }
+                if (softwareCursorPressedControl == controlId
+                    && (softwareCursorButtonState & (SoftwareCursorButtonState.Pressed | SoftwareCursorButtonState.Held | SoftwareCursorButtonState.Released)) != 0)
+                {
+                    softwareCursorVideoPreviewTime = VideoTimeFromPointer(
+                        softwareCursorPosition.x,
+                        screenRect.xMin,
+                        screenRect.width,
+                        duration);
+                    if (ShouldCommitSoftwareCursorVideoSeek(softwareCursorButtonState))
+                    {
+                        videoPlayer.time = softwareCursorVideoPreviewTime.Value;
+                        softwareCursorVideoPreviewTime = null;
+                    }
+                }
+                return;
+            }
 
             var current = Event.current;
             switch (current.GetTypeForControl(controlId))
@@ -845,6 +1240,21 @@ namespace MacacaGames.RuntimeBugReporter
         private void SeekVideo(float pointerX, Rect trackRect, double duration)
         {
             videoPlayer.time = VideoTimeFromPointer(pointerX, trackRect.xMin, trackRect.width, duration);
+        }
+
+        internal static bool ShouldActivateSoftwareCursorVideoSurface(
+            SoftwareCursorButtonState buttonState,
+            int pressedControl,
+            bool pointerOverVideo)
+        {
+            return (buttonState & SoftwareCursorButtonState.Pressed) != 0
+                && pressedControl == 0
+                && pointerOverVideo;
+        }
+
+        internal static bool ShouldCommitSoftwareCursorVideoSeek(SoftwareCursorButtonState buttonState)
+        {
+            return (buttonState & SoftwareCursorButtonState.Released) != 0;
         }
 
         private void ToggleVideoPlayback()
@@ -888,6 +1298,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         private void ResetVideoPreview()
         {
+            softwareCursorVideoPreviewTime = null;
             if (videoPlayer != null)
             {
                 videoPlayer.Stop();
@@ -907,6 +1318,7 @@ namespace MacacaGames.RuntimeBugReporter
         {
             if (source == videoPlayer && source.url == preparedVideoPath)
             {
+                softwareCursorVideoPreviewTime = null;
                 videoPreviewError = string.IsNullOrEmpty(message) ? "Unity could not preview this video." : message;
                 source.Stop();
                 source.url = string.Empty;
@@ -1037,16 +1449,16 @@ namespace MacacaGames.RuntimeBugReporter
 
             if (stacked)
             {
-                annotationColorIndex = GUILayout.SelectionGrid(annotationColorIndex, AnnotationColorLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
+                annotationColorIndex = SoftwareCursorSelectionGrid(annotationColorIndex, AnnotationColorLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
                 GUILayout.Space(8 * styleScale);
-                annotationSizeIndex = GUILayout.SelectionGrid(annotationSizeIndex, AnnotationSizeLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
+                annotationSizeIndex = SoftwareCursorSelectionGrid(annotationSizeIndex, AnnotationSizeLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
             }
             else
             {
                 GUILayout.BeginHorizontal();
-                annotationColorIndex = GUILayout.SelectionGrid(annotationColorIndex, AnnotationColorLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
+                annotationColorIndex = SoftwareCursorSelectionGrid(annotationColorIndex, AnnotationColorLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
                 GUILayout.Space(10 * styleScale);
-                annotationSizeIndex = GUILayout.SelectionGrid(annotationSizeIndex, AnnotationSizeLabels, 3, categoryStyle, GUILayout.Width(210 * styleScale), GUILayout.Height(44 * styleScale));
+                annotationSizeIndex = SoftwareCursorSelectionGrid(annotationSizeIndex, AnnotationSizeLabels, 3, categoryStyle, GUILayout.Width(210 * styleScale), GUILayout.Height(44 * styleScale));
                 GUILayout.EndHorizontal();
             }
         }
@@ -1060,8 +1472,8 @@ namespace MacacaGames.RuntimeBugReporter
         {
             GUI.enabled = enabled;
             var clicked = width > 0f
-                ? GUILayout.Button(label, buttonStyle, GUILayout.Width(width), GUILayout.Height(44 * styleScale))
-                : GUILayout.Button(label, buttonStyle, GUILayout.ExpandWidth(true), GUILayout.Height(44 * styleScale));
+                ? SoftwareCursorButton(label, buttonStyle, GUILayout.Width(width), GUILayout.Height(44 * styleScale))
+                : SoftwareCursorButton(label, buttonStyle, GUILayout.ExpandWidth(true), GUILayout.Height(44 * styleScale));
             if (clicked)
                 action();
             GUI.enabled = true;
@@ -1071,6 +1483,30 @@ namespace MacacaGames.RuntimeBugReporter
         {
             var current = Event.current;
             var controlId = GUIUtility.GetControlID("MacacaBeaconScreenshotAnnotation".GetHashCode(), FocusType.Passive, imageRect);
+            if (IsSoftwareCursorActive())
+            {
+                var screenRect = new Rect(GUIUtility.GUIToScreenPoint(imageRect.position), imageRect.size);
+                if ((softwareCursorButtonState & SoftwareCursorButtonState.Pressed) != 0
+                    && softwareCursorPressedControl == 0
+                    && screenRect.Contains(softwareCursorPosition))
+                {
+                    softwareCursorPressedControl = controlId;
+                    screenshotAnnotator.BeginStroke(ToNormalizedPoint(screenRect, softwareCursorPosition), SelectedAnnotationColor(), SelectedBrushRadius());
+                }
+                else if (softwareCursorPressedControl == controlId
+                    && (softwareCursorButtonState & SoftwareCursorButtonState.Held) != 0)
+                {
+                    screenshotAnnotator.AddPoint(ToNormalizedPoint(screenRect, softwareCursorPosition));
+                }
+                if (softwareCursorPressedControl == controlId
+                    && (softwareCursorButtonState & SoftwareCursorButtonState.Released) != 0)
+                {
+                    screenshotAnnotator.AddPoint(ToNormalizedPoint(screenRect, softwareCursorPosition));
+                    screenshotAnnotator.EndStroke();
+                }
+                return;
+            }
+
             if (current.type == EventType.MouseDown && current.button == 0 && imageRect.Contains(current.mousePosition))
             {
                 GUIUtility.hotControl = controlId;
@@ -1152,21 +1588,28 @@ namespace MacacaGames.RuntimeBugReporter
             var categories = SafeCategories();
             var columns = compact && windowRect.width < 560f ? 2 : 3;
             var rows = Mathf.CeilToInt(categories.Length / (float)columns);
-            categoryIndex = GUILayout.SelectionGrid(categoryIndex, categories, columns, categoryStyle, GUILayout.Height(rows * 48f * styleScale));
+            categoryIndex = SoftwareCursorSelectionGrid(categoryIndex, categories, columns, categoryStyle, GUILayout.Height(rows * 48f * styleScale));
             GUILayout.Space(14 * styleScale);
 
             DrawLabel("TITLE  *");
+            RestoreSoftwareCursorTextFocus("BugReportTitle");
             GUI.SetNextControlName("BugReportTitle");
             title = GUILayout.TextField(title, 120, fieldStyle, GUILayout.Height(48 * styleScale));
+            FocusSoftwareCursorControl("BugReportTitle", GUILayoutUtility.GetLastRect());
             GUILayout.Space(12 * styleScale);
 
             DrawLabel("WHAT HAPPENED?  *");
+            RestoreSoftwareCursorTextFocus("BugReportDescription");
             GUI.SetNextControlName("BugReportDescription");
             description = GUILayout.TextArea(description, 2000, areaStyle, GUILayout.MinHeight((compact ? 116 : 150) * styleScale));
+            FocusSoftwareCursorControl("BugReportDescription", GUILayoutUtility.GetLastRect());
             GUILayout.Space(12 * styleScale);
 
             DrawLabel("REPORTER / CONTACT  (OPTIONAL)");
+            RestoreSoftwareCursorTextFocus("BugReportReporter");
+            GUI.SetNextControlName("BugReportReporter");
             reporter = GUILayout.TextField(reporter, 120, fieldStyle, GUILayout.Height(48 * styleScale));
+            FocusSoftwareCursorControl("BugReportReporter", GUILayoutUtility.GetLastRect());
 
             if (!string.IsNullOrEmpty(validationMessage))
             {
@@ -1427,6 +1870,7 @@ namespace MacacaGames.RuntimeBugReporter
             windowTexture = window;
             accentTexture = accent;
             fieldTexture = preview;
+            softwareCursorTexture = MakeSoftwareCursorTexture();
 
             titleStyle = new GUIStyle(GUI.skin.label)
             {
@@ -1587,6 +2031,47 @@ namespace MacacaGames.RuntimeBugReporter
             return texture;
         }
 
+        private Texture2D MakeSoftwareCursorTexture()
+        {
+            var rows = new[]
+            {
+                "X...........",
+                "XX..........",
+                "XOX.........",
+                "XOOX........",
+                "XOOOX.......",
+                "XOOOOX......",
+                "XOOOOOX.....",
+                "XOOOOOOX....",
+                "XOOOOOOOX...",
+                "XOOOOXXXXX..",
+                "XOOXOX......",
+                "XOX.OX......",
+                "XX..OX......",
+                "X....OX.....",
+                ".....OX.....",
+                "......X....."
+            };
+            var texture = new Texture2D(rows[0].Length, rows.Length, TextureFormat.RGBA32, false)
+            {
+                hideFlags = HideFlags.HideAndDontSave,
+                filterMode = FilterMode.Point,
+                wrapMode = TextureWrapMode.Clamp
+            };
+            for (var y = 0; y < rows.Length; y++)
+            {
+                for (var x = 0; x < rows[y].Length; x++)
+                {
+                    var pixel = rows[y][x];
+                    texture.SetPixel(x, rows.Length - 1 - y,
+                        pixel == 'X' ? new Color(0.08f, 0.07f, 0.06f, 1f) : pixel == 'O' ? Color.white : Color.clear);
+                }
+            }
+            texture.Apply(false, true);
+            styleTextures.Add(texture);
+            return texture;
+        }
+
         private void ReleaseStyleTextures()
         {
             foreach (var texture in styleTextures)
@@ -1595,6 +2080,7 @@ namespace MacacaGames.RuntimeBugReporter
                     Destroy(texture);
             }
             styleTextures.Clear();
+            softwareCursorTexture = null;
             titleStyle = null;
         }
     }

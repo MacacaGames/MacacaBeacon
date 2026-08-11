@@ -9,6 +9,7 @@ namespace MacacaGames.RuntimeBugReporter
         private static readonly List<IBugReportDataProvider> Providers = new List<IBugReportDataProvider>();
         internal static IBugReportTransport TransportOverride;
         internal static IVideoEncoderBackend VideoEncoderOverride;
+        internal static bool SoftwareCursorEnabled { get; private set; } = true;
 
         public static bool IsOpen => BugReporterController.Instance != null && BugReporterController.Instance.IsOpen;
 
@@ -60,6 +61,16 @@ namespace MacacaGames.RuntimeBugReporter
 #endif
         }
 
+        /// <summary>
+        /// Enables or disables BugReporter's desktop software cursor for this
+        /// runtime session. This does not create the reporter or change Unity's
+        /// cursor state. Handheld and console device classes remain excluded.
+        /// </summary>
+        public static void SetSoftwareCursorEnabled(bool enabled)
+        {
+            SoftwareCursorEnabled = enabled;
+        }
+
         public static void RegisterDataProvider(IBugReportDataProvider provider)
         {
             if (provider != null && !Providers.Contains(provider))
@@ -95,6 +106,12 @@ namespace MacacaGames.RuntimeBugReporter
             if (IsEnabled(settings))
                 EnsureController(settings);
 #endif
+        }
+
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+        private static void ResetSessionState()
+        {
+            SoftwareCursorEnabled = true;
         }
 
         internal static bool IsEnabled(BugReporterSettings settings)
