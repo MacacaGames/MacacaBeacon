@@ -23,6 +23,7 @@ namespace MacacaGames.RuntimeBugReporter
         private static readonly string[] AnnotationSizeLabels = { "S", "M", "L" };
         private static readonly string[] CaptureTabLabels = { "SCREENSHOT", "VIDEO" };
         private static readonly int VideoSeekControlHash = "MacacaBeaconVideoSeek".GetHashCode();
+        private static readonly int ScrollbarControlHash = "MacacaBeaconScrollbar".GetHashCode();
         internal static Func<Vector2> SoftwareCursorDeltaReader;
         internal static Func<SoftwareCursorButtonState> SoftwareCursorButtonReader;
 
@@ -78,6 +79,8 @@ namespace MacacaGames.RuntimeBugReporter
         private SoftwareCursorButtonState softwareCursorButtonState;
         private int softwareCursorButtonFrame = -1;
         private int softwareCursorPressedControl;
+        private int softwareCursorScrollTarget;
+        private float softwareCursorScrollLastY;
         private string softwareCursorFocusedTextControl;
         private int softwareCursorFocusedTextControlId;
         private double? softwareCursorVideoPreviewTime;
@@ -151,6 +154,7 @@ namespace MacacaGames.RuntimeBugReporter
             softwareCursorButtonState = SoftwareCursorButtonState.None;
             softwareCursorButtonFrame = -1;
             softwareCursorPressedControl = 0;
+            softwareCursorScrollTarget = 0;
             softwareCursorFocusedTextControl = null;
             softwareCursorFocusedTextControlId = 0;
             softwareCursorVideoPreviewTime = null;
@@ -303,6 +307,7 @@ namespace MacacaGames.RuntimeBugReporter
             softwareCursorButtonState = SoftwareCursorButtonState.None;
             softwareCursorButtonFrame = -1;
             softwareCursorPressedControl = 0;
+            softwareCursorScrollTarget = 0;
             softwareCursorFocusedTextControl = null;
             softwareCursorFocusedTextControlId = 0;
             softwareCursorVideoPreviewTime = null;
@@ -338,6 +343,7 @@ namespace MacacaGames.RuntimeBugReporter
                 softwareCursorButtonState = SoftwareCursorButtonState.None;
                 softwareCursorButtonFrame = -1;
                 softwareCursorPressedControl = 0;
+                softwareCursorScrollTarget = 0;
                 softwareCursorFocusedTextControl = null;
                 softwareCursorFocusedTextControlId = 0;
                 softwareCursorVideoPreviewTime = null;
@@ -515,6 +521,7 @@ namespace MacacaGames.RuntimeBugReporter
             if ((softwareCursorButtonState & SoftwareCursorButtonState.Pressed) != 0)
             {
                 softwareCursorPressedControl = 0;
+                softwareCursorScrollTarget = 0;
                 softwareCursorFocusedTextControl = null;
                 softwareCursorFocusedTextControlId = 0;
                 softwareCursorVideoPreviewTime = null;
@@ -525,7 +532,10 @@ namespace MacacaGames.RuntimeBugReporter
         private void FinishSoftwareCursorButtonState()
         {
             if ((softwareCursorButtonState & SoftwareCursorButtonState.Released) != 0)
+            {
                 softwareCursorPressedControl = 0;
+                softwareCursorScrollTarget = 0;
+            }
             softwareCursorButtonState = SoftwareCursorButtonState.None;
         }
 
@@ -879,6 +889,7 @@ namespace MacacaGames.RuntimeBugReporter
         private void HandleScrollInput()
         {
             var current = Event.current;
+            HandleSoftwareCursorScrollbarDrag();
             if (current.type == EventType.ScrollWheel)
             {
                 var target = GetScrollTarget(IsSoftwareCursorActive() ? softwareCursorPosition : current.mousePosition);
@@ -934,6 +945,77 @@ namespace MacacaGames.RuntimeBugReporter
             }
             if (touch.phase == TouchPhase.Ended || touch.phase == TouchPhase.Canceled)
                 touchScrollId = -1;
+        }
+
+        private void HandleSoftwareCursorScrollbarDrag()
+        {
+            if (!IsSoftwareCursorActive())
+                return;
+
+            if ((softwareCursorButtonState & SoftwareCursorButtonState.Pressed) != 0
+                && softwareCursorPressedControl == 0)
+            {
+                softwareCursorScrollTarget = GetSoftwareCursorScrollbarTarget(
+                    softwareCursorPosition,
+                    windowRect,
+                    styleScale,
+                    CanUseDesktopLayout());
+                if (softwareCursorScrollTarget != 0)
+                {
+                    softwareCursorPressedControl = ScrollbarControlHash + softwareCursorScrollTarget;
+                    softwareCursorScrollLastY = softwareCursorPosition.y;
+                }
+            }
+
+            if (softwareCursorScrollTarget == 0
+                || softwareCursorPressedControl != ScrollbarControlHash + softwareCursorScrollTarget)
+                return;
+
+            if ((softwareCursorButtonState & (SoftwareCursorButtonState.Held | SoftwareCursorButtonState.Released)) != 0)
+            {
+                var deltaY = softwareCursorPosition.y - softwareCursorScrollLastY;
+                if (softwareCursorScrollTarget == 1)
+                    contentScroll.y = NextSoftwareCursorScrollPosition(contentScroll.y, deltaY);
+                else
+                    formScroll.y = NextSoftwareCursorScrollPosition(formScroll.y, deltaY);
+                softwareCursorScrollLastY = softwareCursorPosition.y;
+            }
+        }
+
+        internal static int GetSoftwareCursorScrollbarTarget(
+            Vector2 point,
+            Rect reportWindow,
+            float scale,
+            bool desktopLayout)
+        {
+            scale = Mathf.Max(0.1f, scale);
+            var top = reportWindow.y + (94f + 18f) * scale;
+            var bottom = reportWindow.yMax - (86f + 18f) * scale;
+            if (point.y < top || point.y > bottom)
+                return 0;
+
+            var outerPadding = 28f * scale;
+            var cardRightPadding = 20f * scale;
+            var gutterWidth = Mathf.Max(16f, 18f * scale);
+            if (!desktopLayout)
+            {
+                var right = reportWindow.xMax - outerPadding - cardRightPadding;
+                return point.x >= right - gutterWidth && point.x <= right ? 2 : 0;
+            }
+
+            var availableWidth = reportWindow.width - outerPadding * 2f;
+            var leftWidth = availableWidth * 0.44f;
+            var leftRight = reportWindow.x + outerPadding + leftWidth - cardRightPadding;
+            if (point.x >= leftRight - gutterWidth && point.x <= leftRight)
+                return 1;
+
+            var rightRight = reportWindow.xMax - outerPadding - cardRightPadding;
+            return point.x >= rightRight - gutterWidth && point.x <= rightRight ? 2 : 0;
+        }
+
+        internal static float NextSoftwareCursorScrollPosition(float current, float pointerDeltaY)
+        {
+            return Mathf.Max(0f, current + pointerDeltaY * 2f);
         }
 
         private int GetScrollTarget(Vector2 point)
