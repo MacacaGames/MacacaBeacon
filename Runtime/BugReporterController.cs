@@ -50,6 +50,7 @@ namespace MacacaGames.RuntimeBugReporter
         private int captureTabIndex;
         private bool videoCaptureRequested;
         private bool videoCaptureCompleted;
+        private bool includeScreenshotInReport;
         private bool includeVideoInReport;
         private Texture2D screenshotPreview;
         private ScreenshotAnnotator screenshotAnnotator;
@@ -143,6 +144,7 @@ namespace MacacaGames.RuntimeBugReporter
             videoCapture?.DeleteFile();
             videoCapture = null;
             captureTabIndex = 0;
+            includeScreenshotInReport = false;
             includeVideoInReport = false;
             softwareCursorInitialized = false;
             softwareCursorDeltaFrame = -1;
@@ -257,6 +259,7 @@ namespace MacacaGames.RuntimeBugReporter
             videoCapture?.DeleteFile();
             videoCapture = null;
             captureTabIndex = 0;
+            includeScreenshotInReport = false;
             includeVideoInReport = false;
             videoCaptureRequested = videoRecorder != null && videoRecorder.IsEnabled;
             videoCaptureCompleted = false;
@@ -286,6 +289,7 @@ namespace MacacaGames.RuntimeBugReporter
                 yield return CaptureUtility.CapturePng((bytes, texture) =>
                 {
                     screenshotBytes = bytes;
+                    includeScreenshotInReport = DefaultScreenshotInclusion(bytes);
                     if (screenshotPreview != null) Destroy(screenshotPreview);
                     screenshotPreview = texture;
                     screenshotAnnotator = texture == null ? null : new ScreenshotAnnotator(texture);
@@ -793,8 +797,6 @@ namespace MacacaGames.RuntimeBugReporter
             var previewWidth = Mathf.Max(100f,
                 leftWidth - cardStyle.padding.left - cardStyle.padding.right - 24f * styleScale);
             DrawCaptureReviewPanel(previewWidth, Mathf.Clamp(contentHeight * 0.36f, 220f, 480f));
-            GUILayout.Space(16 * styleScale);
-            DrawCaptureSummary();
             GUILayout.FlexibleSpace();
             GUILayout.Label(settings.privacyNotice, hintStyle);
             GUILayout.EndScrollView();
@@ -955,8 +957,6 @@ namespace MacacaGames.RuntimeBugReporter
             var previewWidth = Mathf.Max(100f,
                 windowRect.width - 56f * styleScale - cardStyle.padding.left - cardStyle.padding.right - 24f * styleScale);
             DrawCaptureReviewPanel(previewWidth, Mathf.Clamp(windowRect.width * 0.58f, 200f, 460f));
-            GUILayout.Space(14 * styleScale);
-            DrawCaptureSummary();
             GUILayout.Space(18 * styleScale);
             DrawForm(true);
             GUILayout.Space(12 * styleScale);
@@ -1076,22 +1076,6 @@ namespace MacacaGames.RuntimeBugReporter
             {
                 GUI.Label(rect, VideoReviewMessage(reviewState), previewMessageStyle);
             }
-
-            GUILayout.Space(10f * styleScale);
-            var canInclude = HasVideoCaptureFile(videoCapture);
-            if (!canInclude)
-                includeVideoInReport = false;
-            GUI.enabled = canInclude && !isSending;
-            var inclusionLabel = includeVideoInReport
-                ? "[ON]  INCLUDE VIDEO IN THIS REPORT"
-                : "[OFF]  INCLUDE VIDEO IN THIS REPORT";
-            includeVideoInReport = SoftwareCursorToggle(
-                includeVideoInReport,
-                inclusionLabel,
-                inclusionToggleStyle,
-                GUILayout.Height((IsMobileLayout() ? 56f : 50f) * styleScale),
-                GUILayout.ExpandWidth(true));
-            GUI.enabled = true;
         }
 
         private void DrawVideoInteraction(Rect imageRect)
@@ -1353,6 +1337,16 @@ namespace MacacaGames.RuntimeBugReporter
             return HasVideoCaptureFile(capture);
         }
 
+        internal static bool DefaultScreenshotInclusion(byte[] screenshot)
+        {
+            return screenshot != null && screenshot.Length > 0;
+        }
+
+        internal static bool ShouldAttachScreenshot(bool includeScreenshot, byte[] screenshot)
+        {
+            return includeScreenshot && DefaultScreenshotInclusion(screenshot);
+        }
+
         internal static bool ShouldAttachVideo(bool includeVideo, VideoCaptureResult capture)
         {
             return includeVideo && HasVideoCaptureFile(capture);
@@ -1559,27 +1553,37 @@ namespace MacacaGames.RuntimeBugReporter
             return new Rect(bounds.x + (bounds.width - width) * 0.5f, bounds.y + (bounds.height - height) * 0.5f, width, height);
         }
 
-        private void DrawCaptureSummary()
+        private void DrawAttachments()
         {
-            DrawLabel("REPORT CONTENTS");
-            var screenshotState = settings.includeScreenshot && screenshotBytes != null
-                ? screenshotAnnotator != null && screenshotAnnotator.HasAnnotations ? "[READY] Screenshot + annotations" : "[READY] Screenshot"
-                : "[OFF] Screenshot";
-            var videoReviewState = CurrentVideoReviewState();
-            string videoState;
-            if (videoReviewState == VideoReviewState.Preparing)
-                videoState = videoRecorder.IsEncoding ? "[WAIT] Video encoding in background" : "[WAIT] Video recording";
-            else if (videoReviewState == VideoReviewState.Unavailable)
-                videoState = videoCaptureRequested ? "[OFF] Video unavailable" : "[OFF] Video not recorded";
-            else
-            {
-                var previewNote = videoReviewState == VideoReviewState.PreviewUnavailable ? " (preview unavailable)" : string.Empty;
-                videoState = includeVideoInReport
-                    ? "[READY] " + videoCapture.Extension.TrimStart('.').ToUpperInvariant() + " video included" + previewNote
-                    : "[OFF] " + videoCapture.Extension.TrimStart('.').ToUpperInvariant() + " video excluded" + previewNote;
-            }
-            var logState = settings.includeRecentLogs ? "[READY] Recent logs" : "[OFF] Recent logs";
-            GUILayout.Label(screenshotState + "\n" + videoState + "\n" + logState, hintStyle);
+            DrawLabel("Attachments");
+            var optionHeight = (IsMobileLayout() ? 56f : 50f) * styleScale;
+            GUILayout.BeginHorizontal();
+
+            var canIncludeScreenshot = DefaultScreenshotInclusion(screenshotBytes);
+            if (!canIncludeScreenshot)
+                includeScreenshotInReport = false;
+            GUI.enabled = canIncludeScreenshot && !isSending;
+            includeScreenshotInReport = SoftwareCursorToggle(
+                includeScreenshotInReport,
+                "Screenshot",
+                inclusionToggleStyle,
+                GUILayout.Height(optionHeight),
+                GUILayout.ExpandWidth(true));
+            GUI.enabled = true;
+
+            GUILayout.Space(6f * styleScale);
+            var canIncludeVideo = HasVideoCaptureFile(videoCapture);
+            if (!canIncludeVideo)
+                includeVideoInReport = false;
+            GUI.enabled = canIncludeVideo && !isSending;
+            includeVideoInReport = SoftwareCursorToggle(
+                includeVideoInReport,
+                "Video",
+                inclusionToggleStyle,
+                GUILayout.Height(optionHeight),
+                GUILayout.ExpandWidth(true));
+            GUI.enabled = true;
+            GUILayout.EndHorizontal();
         }
 
         private void DrawForm(bool compact)
@@ -1589,6 +1593,9 @@ namespace MacacaGames.RuntimeBugReporter
             var columns = compact && windowRect.width < 560f ? 2 : 3;
             var rows = Mathf.CeilToInt(categories.Length / (float)columns);
             categoryIndex = SoftwareCursorSelectionGrid(categoryIndex, categories, columns, categoryStyle, GUILayout.Height(rows * 48f * styleScale));
+            GUILayout.Space(14 * styleScale);
+
+            DrawAttachments();
             GUILayout.Space(14 * styleScale);
 
             DrawLabel("TITLE  *");
@@ -1646,6 +1653,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         private IEnumerator RecaptureScreenshot()
         {
+            var includeRecapturedScreenshot = screenshotBytes == null || includeScreenshotInReport;
             isOpening = true;
             statusIsError = false;
             status = "Recapturing screenshot…";
@@ -1655,6 +1663,7 @@ namespace MacacaGames.RuntimeBugReporter
             yield return CaptureUtility.CapturePng((bytes, texture) =>
             {
                 screenshotBytes = bytes;
+                includeScreenshotInReport = includeRecapturedScreenshot && DefaultScreenshotInclusion(bytes);
                 if (screenshotPreview != null) Destroy(screenshotPreview);
                 screenshotPreview = texture;
                 screenshotAnnotator = texture == null ? null : new ScreenshotAnnotator(texture);
@@ -1727,7 +1736,7 @@ namespace MacacaGames.RuntimeBugReporter
             report.Fields["OS"] = SystemInfo.operatingSystem;
             report.Fields["GPU"] = SystemInfo.graphicsDeviceName;
 
-            if (settings.includeScreenshot && screenshotBytes != null)
+            if (ShouldAttachScreenshot(includeScreenshotInReport, screenshotBytes))
             {
                 var finalScreenshot = screenshotAnnotator != null && screenshotAnnotator.HasAnnotations
                     ? screenshotAnnotator.EncodePng()
@@ -1950,7 +1959,7 @@ namespace MacacaGames.RuntimeBugReporter
 
             inclusionToggleStyle = new GUIStyle(categoryStyle)
             {
-                alignment = TextAnchor.MiddleLeft,
+                alignment = TextAnchor.MiddleCenter,
                 fontSize = Mathf.RoundToInt(15 * scale),
                 padding = new RectOffset(Mathf.RoundToInt(16 * scale), Mathf.RoundToInt(16 * scale), 0, 0),
                 margin = new RectOffset(0, 0, 2, 2)
