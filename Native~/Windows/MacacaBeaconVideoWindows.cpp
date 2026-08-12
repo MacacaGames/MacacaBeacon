@@ -5,6 +5,7 @@
 #include <mferror.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
+#include <mftransform.h>
 #include <shlwapi.h>
 #include <wincodec.h>
 #include <d3d10_1.h>
@@ -82,6 +83,65 @@ namespace
         message += code;
         message += ")";
         return message;
+    }
+
+    std::string ProbeDx11H264Encoders()
+    {
+        const MFT_REGISTER_TYPE_INFO input = { MFMediaType_Video, MFVideoFormat_NV12 };
+        const MFT_REGISTER_TYPE_INFO output = { MFMediaType_Video, MFVideoFormat_H264 };
+        IMFActivate** hardware = nullptr;
+        IMFActivate** software = nullptr;
+        UINT32 hardwareCount = 0;
+        UINT32 softwareCount = 0;
+        UINT32 d3d11AwareCount = 0;
+        UINT32 inspectionFailures = 0;
+        const HRESULT hardwareResult = MFTEnumEx(
+            MFT_CATEGORY_VIDEO_ENCODER,
+            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+            &input, &output, &hardware, &hardwareCount);
+        if (SUCCEEDED(hardwareResult))
+        {
+            for (UINT32 index = 0; index < hardwareCount; ++index)
+            {
+                IMFTransform* transform = nullptr;
+                IMFAttributes* attributes = nullptr;
+                UINT32 d3d11Aware = FALSE;
+                HRESULT result = hardware[index]->ActivateObject(IID_PPV_ARGS(&transform));
+                if (SUCCEEDED(result))
+                    result = transform->GetAttributes(&attributes);
+                if (SUCCEEDED(result))
+                    result = attributes->GetUINT32(MF_SA_D3D11_AWARE, &d3d11Aware);
+                if (SUCCEEDED(result) && d3d11Aware != FALSE)
+                    ++d3d11AwareCount;
+                else if (FAILED(result))
+                    ++inspectionFailures;
+                SafeRelease(attributes);
+                SafeRelease(transform);
+                hardware[index]->ShutdownObject();
+                SafeRelease(hardware[index]);
+            }
+        }
+        CoTaskMemFree(hardware);
+
+        const HRESULT softwareResult = MFTEnumEx(
+            MFT_CATEGORY_VIDEO_ENCODER,
+            MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT |
+                MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+            &input, &output, &software, &softwareCount);
+        if (SUCCEEDED(softwareResult))
+        {
+            for (UINT32 index = 0; index < softwareCount; ++index)
+                SafeRelease(software[index]);
+        }
+        CoTaskMemFree(software);
+
+        char summary[320] = {};
+        sprintf_s(summary,
+            " DX11 H.264 MFT probe: hardware NV12->H.264=%u (D3D11-aware=%u, inspection failures=%u, enum HRESULT=0x%08lX), software=%u (enum HRESULT=0x%08lX).",
+            hardwareCount, d3d11AwareCount, inspectionFailures,
+            static_cast<unsigned long>(hardwareResult), softwareCount,
+            static_cast<unsigned long>(softwareResult));
+        return summary;
     }
 
     struct EncoderSession
@@ -216,7 +276,7 @@ namespace
         return SUCCEEDED(result) || session->Fail(failedOperation, result);
     }
 
-    bool ConfigureInput(EncoderSession* session)
+    bool ConfigureInput(EncoderSession* session, bool probeDx11EncoderOnNegotiationFailure)
     {
         IMFMediaType* inputType = nullptr;
         IMFAttributes* allocatorAttributes = nullptr;
@@ -262,7 +322,12 @@ namespace
         }
         SafeRelease(allocatorAttributes);
         SafeRelease(inputType);
-        return SUCCEEDED(result) || session->Fail(failedOperation, result);
+        if (SUCCEEDED(result))
+            return true;
+        session->Fail(failedOperation, result);
+        if (probeDx11EncoderOnNegotiationFailure && result == E_NOTIMPL)
+            session->lastError += ProbeDx11H264Encoders();
+        return false;
     }
 
     bool DecodeJpeg(EncoderSession* session, const uint8_t* bytes, int byteCount, std::vector<uint8_t>& pixels)
@@ -591,7 +656,8 @@ static EncoderSession* CreateEncoderSession(
     int height,
     int framesPerSecond,
     int bitrate,
-    ID3D11Texture2D* gpuTexture)
+    ID3D11Texture2D* gpuTexture,
+    bool probeDx11EncoderOnNegotiationFailure)
 {
     EncoderSession* session = new (std::nothrow) EncoderSession();
     if (session == nullptr)
@@ -728,7 +794,7 @@ static EncoderSession* CreateEncoderSession(
 
     if (!ConfigureOutput(session, std::max(128000, bitrate)))
         return session;
-    if (!ConfigureInput(session))
+    if (!ConfigureInput(session, probeDx11EncoderOnNegotiationFailure))
         return session;
 
     result = session->writer->BeginWriting();
@@ -900,7 +966,7 @@ static bool InitializeD3D11EncoderWorker(EncoderSession* session)
 
     session->d3d12Delegate = CreateEncoderSession(
         session->outputPathUtf8.c_str(), session->width, session->height,
-        session->framesPerSecond, session->bitrate, session->d3d11CopyTexture);
+        session->framesPerSecond, session->bitrate, session->d3d11CopyTexture, false);
     if (session->d3d12Delegate == nullptr || !session->d3d12Delegate->ready)
     {
         if (session->d3d12Delegate != nullptr && !session->d3d12Delegate->lastError.empty())
@@ -1229,7 +1295,7 @@ extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_Create(
     int framesPerSecond,
     int bitrate)
 {
-    return CreateEncoderSession(outputPath, width, height, framesPerSecond, bitrate, nullptr);
+    return CreateEncoderSession(outputPath, width, height, framesPerSecond, bitrate, nullptr, false);
 }
 
 extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_GpuCreate(
@@ -1241,7 +1307,7 @@ extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_GpuCreat
     void* nativeTexture)
 {
     return CreateEncoderSession(outputPath, width, height, framesPerSecond, bitrate,
-        static_cast<ID3D11Texture2D*>(nativeTexture));
+        static_cast<ID3D11Texture2D*>(nativeTexture), true);
 }
 
 extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_GpuCreateD3D12(
