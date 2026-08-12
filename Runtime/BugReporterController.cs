@@ -184,6 +184,7 @@ namespace MacacaGames.RuntimeBugReporter
             if (videoPlayer != null)
             {
                 videoPlayer.prepareCompleted -= OnVideoPrepared;
+                videoPlayer.frameReady -= OnVideoFirstFrameReady;
                 videoPlayer.errorReceived -= OnVideoError;
             }
             videoCapture?.DeleteFile();
@@ -1378,6 +1379,8 @@ namespace MacacaGames.RuntimeBugReporter
             softwareCursorVideoPreviewTime = null;
             if (videoPlayer != null)
             {
+                videoPlayer.frameReady -= OnVideoFirstFrameReady;
+                videoPlayer.sendFrameReadyEvents = false;
                 videoPlayer.Stop();
                 videoPlayer.url = string.Empty;
             }
@@ -1388,7 +1391,21 @@ namespace MacacaGames.RuntimeBugReporter
         private void OnVideoPrepared(VideoPlayer source)
         {
             if (source == videoPlayer && source.url == preparedVideoPath)
+            {
                 videoPreviewError = null;
+                source.frameReady -= OnVideoFirstFrameReady;
+                source.frameReady += OnVideoFirstFrameReady;
+                source.sendFrameReadyEvents = true;
+                source.Play();
+            }
+        }
+
+        private void OnVideoFirstFrameReady(VideoPlayer source, long frameIndex)
+        {
+            source.frameReady -= OnVideoFirstFrameReady;
+            source.sendFrameReadyEvents = false;
+            if (source == videoPlayer && source.url == preparedVideoPath)
+                source.Pause();
         }
 
         private void OnVideoError(VideoPlayer source, string message)
