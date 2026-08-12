@@ -1,7 +1,9 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 
@@ -18,6 +20,7 @@ namespace MacacaGames.RuntimeBugReporter
     internal sealed class RollingVideoRecorder
     {
         private const string VideoBackendArgument = "-macaca-beacon-video-backend";
+        private const int DiagnosticCapacity = 32;
         // The Metal texture-submit path is still experimental. Keep it opt-in
         // until it has been validated against the Editor's native plugin
         // lifetime and graphics-device reset paths; the existing CPU/native
@@ -29,6 +32,7 @@ namespace MacacaGames.RuntimeBugReporter
         private readonly BugReporterSettings settings;
         private readonly WindowsVideoBackendMode windowsVideoBackendMode;
         private readonly Queue<VideoCaptureFrame> history = new Queue<VideoCaptureFrame>();
+        private readonly Queue<string> diagnosticEntries = new Queue<string>();
         private List<VideoCaptureFrame> incidentFrames;
         private Action<VideoCaptureResult> incidentCompleted;
         private double captureStartedTime;
@@ -43,6 +47,7 @@ namespace MacacaGames.RuntimeBugReporter
         private string frameCacheDirectory;
         private long historyBytes;
         private bool backendEnvironmentLogged;
+        private VideoCaptureResult lastDiagnosticCapture;
         private readonly MacOsGpuRollingVideoRecorder gpuRecorder;
         private readonly AndroidGpuRollingVideoRecorder androidGpuRecorder;
         private WindowsGpuRollingVideoRecorder windowsGpuRecorder;
@@ -57,7 +62,7 @@ namespace MacacaGames.RuntimeBugReporter
             this.settings = settings;
             var requestedBackend = ParseWindowsVideoBackend(Environment.GetCommandLineArgs(), out var invalidBackend);
             if (!string.IsNullOrEmpty(invalidBackend))
-                Debug.LogWarning("[Macaca Beacon] Unknown video backend '" + invalidBackend + "'; using auto.");
+                RecordDiagnostic("Unknown video backend '" + invalidBackend + "'; using auto.", LogType.Warning);
 #if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
             windowsVideoBackendMode = requestedBackend;
 #else
@@ -159,12 +164,12 @@ namespace MacacaGames.RuntimeBugReporter
                         : windowsVideoBackendMode == WindowsVideoBackendMode.ManagedAvi
                             ? "managed-avi"
                             : "generic-auto";
-                Debug.Log("[Macaca Beacon] Video backend mode=" + BackendModeName(windowsVideoBackendMode) +
-                          ", selected=" + selected +
-                          ", renderer=" + SystemInfo.graphicsDeviceType +
-                          ", device=" + SystemInfo.graphicsDeviceName +
-                          ", os=" + SystemInfo.operatingSystem +
-                          ", unity=" + Application.unityVersion + ".");
+                RecordDiagnostic("Video backend mode=" + BackendModeName(windowsVideoBackendMode) +
+                                 ", selected=" + selected +
+                                 ", renderer=" + SystemInfo.graphicsDeviceType +
+                                 ", device=" + SystemInfo.graphicsDeviceName +
+                                 ", os=" + SystemInfo.operatingSystem +
+                                 ", unity=" + Application.unityVersion + ".");
             }
 #endif
             if (gpuRecorder != null)
@@ -204,14 +209,14 @@ namespace MacacaGames.RuntimeBugReporter
             if (windowsVideoBackendMode == WindowsVideoBackendMode.WindowsGpu)
             {
                 requestedEnabled = false;
-                Debug.LogWarning("[Macaca Beacon] Forced Windows GPU video failed on " + SystemInfo.graphicsDeviceType +
-                                 ": " + (error ?? "unknown error") + ". Generic fallback is disabled for this diagnostic run.");
+                RecordDiagnostic("Forced Windows GPU video failed on " + SystemInfo.graphicsDeviceType +
+                                 ": " + (error ?? "unknown error") + ". Generic fallback is disabled for this diagnostic run.", LogType.Warning);
                 pendingIncident?.Invoke(null);
                 return;
             }
-            Debug.LogWarning("[Macaca Beacon] Windows GPU video failed on " + SystemInfo.graphicsDeviceType +
+            RecordDiagnostic("Windows GPU video failed on " + SystemInfo.graphicsDeviceType +
                              ": " + (error ?? "unknown error") +
-                             ". Switching to the generic MP4/AVI compatibility recorder with a fresh history.");
+                             ". Switching to the generic MP4/AVI compatibility recorder with a fresh history.", LogType.Warning);
             if (!requestedEnabled)
             {
                 pendingIncident?.Invoke(null);
@@ -225,19 +230,28 @@ namespace MacacaGames.RuntimeBugReporter
 
         public void MarkIncident(Action<VideoCaptureResult> completed)
         {
+            var diagnosticCompleted = completed;
+            if (IsEnabled)
+            {
+                diagnosticCompleted = result =>
+                {
+                    RecordCaptureResult(result);
+                    completed?.Invoke(result);
+                };
+            }
             if (gpuRecorder != null)
             {
-                gpuRecorder.MarkIncident(completed);
+                gpuRecorder.MarkIncident(diagnosticCompleted);
                 return;
             }
             if (androidGpuRecorder != null)
             {
-                androidGpuRecorder.MarkIncident(completed);
+                androidGpuRecorder.MarkIncident(diagnosticCompleted);
                 return;
             }
             if (windowsGpuRecorder != null)
             {
-                windowsGpuRecorder.MarkIncident(completed);
+                windowsGpuRecorder.MarkIncident(diagnosticCompleted);
                 return;
             }
             if (!requestedEnabled)
@@ -248,7 +262,7 @@ namespace MacacaGames.RuntimeBugReporter
 
             var incidentTime = Time.realtimeSinceStartupAsDouble;
             incidentFrames = new List<VideoCaptureFrame>(history);
-            incidentCompleted = completed;
+            incidentCompleted = diagnosticCompleted;
             incidentClipStartTime = Math.Max(captureStartedTime, incidentTime - settings.secondsBefore);
             incidentEndTime = incidentTime + settings.secondsAfter;
             var availableSeconds = history.Count == 0
@@ -528,6 +542,7 @@ namespace MacacaGames.RuntimeBugReporter
             if (task.IsFaulted)
             {
                 Debug.LogException(task.Exception);
+                encoderError = task.Exception?.GetBaseException().Message;
             }
             else
             {
@@ -544,11 +559,14 @@ namespace MacacaGames.RuntimeBugReporter
             isEncoding = false;
             if (result == null)
             {
-                Debug.LogWarning("[Macaca Beacon] Video finalization failed: " + (encoderError ?? "unknown encoder error"));
+                RecordDiagnostic("Video finalization failed: " + (encoderError ?? "unknown encoder error"), LogType.Warning);
             }
             else
             {
-                Debug.Log("[Macaca Beacon] Video finalized by " + result.EncoderName + ": " + result.FrameCount + " frames over " + result.DurationSeconds.ToString("0.00") + " seconds at " + result.FilePath);
+                if (string.Equals(result.Extension, ".avi", StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrEmpty(encoderError))
+                    RecordDiagnostic("Preferred MP4 encoder failed before managed AVI fallback succeeded: " + encoderError, LogType.Warning);
+                RecordCaptureResult(result);
             }
             completed?.Invoke(result);
             DeleteFrameCache();
@@ -557,6 +575,52 @@ namespace MacacaGames.RuntimeBugReporter
             captureStartedTime = Time.realtimeSinceStartupAsDouble;
             if (!requestedEnabled)
                 StopCapture();
+        }
+
+        internal void RecordCaptureResult(VideoCaptureResult result)
+        {
+            if (result == null || ReferenceEquals(result, lastDiagnosticCapture))
+                return;
+            lastDiagnosticCapture = result;
+            var dimensions = result.Width > 0 && result.Height > 0
+                ? ", output=" + result.Width + "x" + result.Height
+                : string.Empty;
+            var effectiveFramesPerSecond = result.DurationSeconds > 0d
+                ? result.FrameCount / result.DurationSeconds
+                : 0d;
+            RecordDiagnostic("Video finalized by " + result.EncoderName +
+                             ": frames=" + result.FrameCount +
+                             ", duration=" + result.DurationSeconds.ToString("0.00", CultureInfo.InvariantCulture) + "s" +
+                             ", effectiveFps=" + effectiveFramesPerSecond.ToString("0.00", CultureInfo.InvariantCulture) +
+                             dimensions +
+                             ", file=" + result.FilePath + ".");
+        }
+
+        internal string BuildDiagnostics()
+        {
+            lock (diagnosticEntries)
+            {
+                var builder = new StringBuilder();
+                foreach (var entry in diagnosticEntries)
+                    builder.AppendLine(entry);
+                return builder.ToString();
+            }
+        }
+
+        private void RecordDiagnostic(string message, LogType type = LogType.Log)
+        {
+            var fullMessage = "[Macaca Beacon] " + message;
+            var entry = "[" + DateTime.UtcNow.ToString("O") + "] [" + type + "] " + fullMessage;
+            lock (diagnosticEntries)
+            {
+                diagnosticEntries.Enqueue(entry);
+                while (diagnosticEntries.Count > DiagnosticCapacity)
+                    diagnosticEntries.Dequeue();
+            }
+            if (type == LogType.Warning)
+                Debug.LogWarning(fullMessage);
+            else
+                Debug.Log(fullMessage);
         }
 
         private void DeleteFrameCache()

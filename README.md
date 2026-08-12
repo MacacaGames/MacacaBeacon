@@ -66,6 +66,7 @@ Steam 專案可以在自己的 Steamworks 初始化完成後，以 `SteamUtils.I
 - 截圖上的選填畫筆標注
 - Product、version、build GUID、Unity、platform、OS、CPU、RAM、GPU、VRAM、resolution、scene
 - 有固定容量上限的 recent log ring buffer；Error／Exception 包含 stack trace
+- 不受 recent log 淘汰影響的錄影關鍵 timeline，包含 backend、fallback 錯誤、輸出尺寸、frame 數、時長與有效 FPS
 - 選填影片：macOS／Windows／Android／iOS 優先 H.264 MP4，預設 6 FPS、前 8 秒＋後 1 秒、無音訊
 
 表單內會顯示資料用途聲明；內容可由 Settings 自訂。請依發行地區及資料內容完成實際隱私／同意流程。
@@ -74,7 +75,7 @@ Steam 專案可以在自己的 Steamworks 初始化完成後，以 `SteamUtils.I
 
 `Enable Rolling Video` 預設關閉。macOS、iOS、Android 與 Windows 會依平台優先使用 GPU readback/native encoder；WebGL 則刻意使用 CPU JPEG capture，避開瀏覽器的 `AsyncGPUReadback` fence 問題，再交給瀏覽器 WebCodecs 做最後的 H.264 編碼。事件完成編碼或 runtime 關閉錄影後，rolling frame cache 會自動清除。
 
-`Maximum Video Cache Megabytes` 預設為 512 MB。直式 960 px、6 FPS、8 秒歷史通常需要比橫式畫面更多 temporary space；raw cache 超過上限時會先丟棄最舊 frame，因此低儲存空間裝置的實際保留秒數可能短於 `Seconds Before`。啟動事件時會在 log 顯示 requested 與 available 秒數。這個限制只影響 temporary raw cache，最終 MP4 仍由 bitrate 與附件大小限制控制。
+`Maximum Video Cache Megabytes` 預設為 512 MB。`Video Width` 是錄影輸出寬度，不是螢幕原生寬度；例如 Steam Deck 的 1280×800 畫面在 960 設定下會等比例錄成 960×600，以控制 readback、cache、編碼與附件成本，不代表裁切或變形。直式 960 px、6 FPS、8 秒歷史通常需要比橫式畫面更多 temporary space；raw cache 超過上限時會先丟棄最舊 frame，因此低儲存空間裝置的實際保留秒數可能短於 `Seconds Before`。啟動事件時會在 log 顯示 requested 與 available 秒數。這個限制只影響 temporary raw cache，最終 MP4 仍由 bitrate 與附件大小限制控制。
 
 macOS Editor／Standalone Player 與 iOS device／Simulator 會優先使用 Metal texture → IOSurface-backed CVPixelBuffer 的 GPU 路徑，再由 AVAssetWriter 產生 H.264 MP4；若 Apple GPU bridge 不可用，才回到 `AsyncGPUReadback` 的 CPU/native 路徑。macOS 使用套件內的 Universal Binary（Apple Silicon + Intel），iOS 則由 Unity 產生 Xcode project 時直接編入相同的 Apple native implementation。Windows Editor／64-bit Standalone Player 使用 Windows 內建 Media Foundation H.264 encoder。Windows GPU session 只有在 native pointer 有效且沒有初始化錯誤時才會啟用；若建立、送幀、segment finalization 或 incident merge 後續失敗，會釋放 GPU recorder 並在同一 runtime session 改用 generic recorder。Windows 與 Apple CPU fallback 直接接受 RGBA frame，不再經過 JPG encode/decode；不需要 ffmpeg 或隨 Player 安裝額外 codec。MIME type 都是 `video/mp4`，且會把 MP4 metadata 寫在 media data 前面，方便 Slack／瀏覽器提早建立預覽。
 
@@ -91,7 +92,7 @@ Windows build 經 Proton 執行時仍屬於 `UNITY_STANDALONE_WIN`，因此會�
 | Windows CPU Media Foundation | `PROTON_LOG=1 %command% -macaca-beacon-video-backend=windows-cpu` | 排除 GPU／DXGI input，只測 RGBA frame → Media Foundation H.264 MP4 |
 | Managed AVI | `PROTON_LOG=1 %command% -macaca-beacon-video-backend=managed-avi` | 排除 Media Foundation，測 generic capture、RGBA → JPEG、AVI 與 report attachment |
 
-每次啟動後送出一份包含 Video 的 report，並在 Unity `Player.log` 搜尋 `[Macaca Beacon]`。開頭會列出 `mode`、實際 `selected` backend、renderer、GPU、OS 與 Unity version；失敗時會列出具體 D3D／Media Foundation operation 與 HRESULT。Steam 的 Proton log 預設為 home 目錄下的 `steam-$APPID.log`；Windows Unity Player log 通常位於 Steam library 的 `steamapps/compatdata/$APPID/pfx/drive_c/users/steamuser/AppData/LocalLow/<CompanyName>/<ProductName>/Player.log`。
+每次啟動後送出一份包含 Video 的 report。Slack 的 `diagnostics-*.txt` 會在一般 Recent logs 之前保留獨立的 `Video recording` 區段：列出螢幕與實際輸出尺寸、設定寬度、frame 數、時長、有效 FPS，以及不受 recent-log 上限淘汰的 backend／fallback 關鍵 timeline。開頭會列出 `mode`、實際 `selected` backend、renderer、GPU、OS 與 Unity version；失敗時會列出具體 D3D／Media Foundation operation 與 HRESULT。若仍需完整外部紀錄，Steam 的 Proton log 預設為 home 目錄下的 `steam-$APPID.log`；Windows Unity Player log 通常位於 Steam library 的 `steamapps/compatdata/$APPID/pfx/drive_c/users/steamuser/AppData/LocalLow/<CompanyName>/<ProductName>/Player.log`。
 
 判讀方式：DX11 成功但 DX12 失敗，問題集中在 D3D12 interop；兩個 GPU 模式失敗但 `windows-cpu` 成功，問題集中在 Video Processor／DXGI GPU input；`windows-cpu` 也失敗但 `managed-avi` 成功，表示 Proton 的 Media Foundation H.264 路徑不可用；連 `managed-avi` 都失敗時，應改查 generic capture、temporary cache 或 report attachment，而不是 GPU encoder。
 
@@ -99,7 +100,7 @@ Windows build 經 Proton 執行時仍屬於 `UNITY_STANDALONE_WIN`，因此會�
 
 `Prefer Mp4` 預設開啟。若 generic recorder 所在平台尚無 MP4 backend，或 CPU/native H.264 encoder 暫時不可用，`Allow Legacy Avi Fallback` 可讓回報退回 managed MJPEG AVI，而不是失去這次影片。既有 JPEG frame 會直接封裝；disk-backed RGBA frame 則只在 fallback finalization 時使用 Unity thread-safe Image Conversion 與 `Video Jpeg Quality` 轉成 JPEG，不會把持續錄影改成每幀即時壓縮。目前正式 MP4 backend 支援矩陣：
 
-頁面內預覽第一版以 H.264 MP4 為支援格式，並在 macOS、Windows、Android 與 iOS Player 使用 Unity 的平台 decoder。AVI fallback、WebGL local temporary file 或裝置 decoder 失敗時，VIDEO tab 會顯示無法預覽，但有效檔案仍可勾選並發送。影片沒有音訊。
+頁面內預覽在非 WebGL Player 使用 Unity 的平台 decoder，支援嘗試 H.264 MP4 與 managed MJPEG AVI。Windows 原生 decoder 通常可接受 AVI 容器，但實際 codec 支援仍由當前 OS／Proton 環境決定；decoder 失敗或 WebGL local temporary file 無法播放時，VIDEO tab 會顯示無法預覽、diagnostics 保留 decoder error，但有效檔案仍可勾選並發送。影片沒有音訊。
 
 | 平台 | Runtime 影片輸出 |
 |---|---|

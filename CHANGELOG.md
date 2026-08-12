@@ -15,6 +15,9 @@
 - Fixed Linux and native Steam Deck incident finalization by converting generic disk-backed RGBA frames for the existing managed MJPEG AVI fallback.
 - Fixed Windows GPU rolling-video recovery by rejecting native sessions with initialization errors and switching create, submit, segment-finalize, or merge failures to the existing generic MP4/AVI recorder without adding Steamworks or device detection.
 - Added opt-in Windows video backend diagnostics for Steam Launch Options, with isolated GPU, CPU Media Foundation, and managed AVI paths plus operation-specific native HRESULT errors; the default Windows GPU path and capture settings are unchanged.
+- Preserved a bounded video backend/fallback timeline in diagnostics independently from recent gameplay logs, including screen/output dimensions, frame count, duration, and effective FPS.
+- Enabled non-WebGL report pages to attempt managed MJPEG AVI preview through the existing Unity `VideoPlayer`, while keeping valid files attachable when the platform decoder rejects them.
+- Documented that `Video Width` intentionally scales output resolution while preserving aspect ratio instead of changing native screen resolution or capture performance policy.
 
 ## 0.5.1
 

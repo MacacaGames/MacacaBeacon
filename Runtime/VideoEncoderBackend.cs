@@ -45,7 +45,7 @@ namespace MacacaGames.RuntimeBugReporter
                 {
                     var customOutputPath = outputStem + custom.Extension;
                     if (custom.TryEncode(customOutputPath, frames, width, height, framesPerSecond, bitrateKbps, durationSeconds, out error))
-                        return new VideoCaptureResult(customOutputPath, custom.Extension, custom.MimeType, durationSeconds, frames.Count, custom.Name);
+                        return new VideoCaptureResult(customOutputPath, custom.Extension, custom.MimeType, durationSeconds, frames.Count, custom.Name, width, height);
                     TryDelete(customOutputPath);
                 }
 
@@ -54,7 +54,7 @@ namespace MacacaGames.RuntimeBugReporter
                 {
                     var outputPath = outputStem + mp4.Extension;
                     if (mp4.TryEncode(outputPath, frames, width, height, framesPerSecond, bitrateKbps, durationSeconds, out error))
-                        return new VideoCaptureResult(outputPath, mp4.Extension, mp4.MimeType, durationSeconds, frames.Count, mp4.Name);
+                        return new VideoCaptureResult(outputPath, mp4.Extension, mp4.MimeType, durationSeconds, frames.Count, mp4.Name, width, height);
                     TryDelete(outputPath);
                 }
                 else
@@ -115,7 +115,7 @@ namespace MacacaGames.RuntimeBugReporter
 
                 var outputPath = outputStem + ".avi";
                 File.WriteAllBytes(outputPath, bytes);
-                return new VideoCaptureResult(outputPath, ".avi", "video/x-msvideo", durationSeconds, frames.Count, "Managed MJPEG AVI fallback");
+                return new VideoCaptureResult(outputPath, ".avi", "video/x-msvideo", durationSeconds, frames.Count, "Managed MJPEG AVI fallback", width, height);
             }
             catch (Exception exception)
             {

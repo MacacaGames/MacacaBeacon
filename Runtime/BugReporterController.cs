@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using UnityEngine;
@@ -48,6 +49,7 @@ namespace MacacaGames.RuntimeBugReporter
         private VideoPlayer videoPlayer;
         private string preparedVideoPath;
         private string videoPreviewError;
+        private string videoPreviewDiagnosticError;
         private int captureTabIndex;
         private bool videoCaptureRequested;
         private bool videoCaptureCompleted;
@@ -150,6 +152,7 @@ namespace MacacaGames.RuntimeBugReporter
             captureTabIndex = 0;
             includeScreenshotInReport = false;
             includeVideoInReport = false;
+            videoPreviewDiagnosticError = null;
             softwareCursorInitialized = false;
             softwareCursorDeltaFrame = -1;
             softwareCursorButtonState = SoftwareCursorButtonState.None;
@@ -262,6 +265,7 @@ namespace MacacaGames.RuntimeBugReporter
             status = "Capturing context…";
             screenshotBytes = null;
             ResetVideoPreview();
+            videoPreviewDiagnosticError = null;
             videoCapture?.DeleteFile();
             videoCapture = null;
             captureTabIndex = 0;
@@ -1414,6 +1418,8 @@ namespace MacacaGames.RuntimeBugReporter
             {
                 softwareCursorVideoPreviewTime = null;
                 videoPreviewError = string.IsNullOrEmpty(message) ? "Unity could not preview this video." : message;
+                videoPreviewDiagnosticError = videoPreviewError;
+                Debug.LogWarning("[Macaca Beacon] Video preview failed: " + videoPreviewError);
                 source.Stop();
                 source.url = string.Empty;
             }
@@ -1464,7 +1470,9 @@ namespace MacacaGames.RuntimeBugReporter
 
         internal static bool CanPreviewVideo(string extension, bool webGlPlayer)
         {
-            return !webGlPlayer && string.Equals(extension, ".mp4", StringComparison.OrdinalIgnoreCase);
+            return !webGlPlayer &&
+                   (string.Equals(extension, ".mp4", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(extension, ".avi", StringComparison.OrdinalIgnoreCase));
         }
 
         internal static double VideoTimeFromPointer(double pointerX, double trackX, double trackWidth, double duration)
@@ -1909,12 +1917,63 @@ namespace MacacaGames.RuntimeBugReporter
                 builder.AppendLine("Resolution: " + Screen.width + "x" + Screen.height + " @ " + Screen.currentResolution.refreshRateRatio.value.ToString("0.##") + " Hz");
                 builder.AppendLine("Scene: " + UnityEngine.SceneManagement.SceneManager.GetActiveScene().name);
             }
+            var videoDiagnostics = BuildVideoDiagnosticsText(
+                videoRecorder?.BuildDiagnostics(),
+                Screen.width,
+                Screen.height,
+                settings.videoWidth,
+                videoCapture,
+                videoPreviewDiagnosticError);
+            if (!string.IsNullOrEmpty(videoDiagnostics))
+            {
+                builder.AppendLine();
+                builder.Append(videoDiagnostics);
+            }
             if (settings.includeRecentLogs)
             {
                 builder.AppendLine();
                 builder.AppendLine("Recent logs");
                 builder.AppendLine("-----------");
                 builder.Append(logs.BuildText());
+            }
+            return builder.ToString();
+        }
+
+        internal static string BuildVideoDiagnosticsText(
+            string timeline,
+            int screenWidth,
+            int screenHeight,
+            int configuredVideoWidth,
+            VideoCaptureResult capture,
+            string previewError)
+        {
+            if (string.IsNullOrEmpty(timeline) && capture == null && string.IsNullOrEmpty(previewError))
+                return string.Empty;
+
+            var builder = new StringBuilder();
+            builder.AppendLine("Video recording");
+            builder.AppendLine("---------------");
+            builder.AppendLine("Screen: " + screenWidth + "x" + screenHeight);
+            builder.AppendLine("Configured Video Width: " + configuredVideoWidth + " px");
+            if (capture != null)
+            {
+                builder.AppendLine("Encoder: " + capture.EncoderName);
+                if (capture.Width > 0 && capture.Height > 0)
+                {
+                    builder.AppendLine("Output: " + capture.Width + "x" + capture.Height);
+                    builder.AppendLine("Scaling: " + screenWidth + "x" + screenHeight + " -> " + capture.Width + "x" + capture.Height);
+                }
+                builder.AppendLine("Frames: " + capture.FrameCount);
+                builder.AppendLine("Duration: " + capture.DurationSeconds.ToString("0.00", CultureInfo.InvariantCulture) + " s");
+                if (capture.DurationSeconds > 0d)
+                    builder.AppendLine("Effective FPS: " + (capture.FrameCount / capture.DurationSeconds).ToString("0.00", CultureInfo.InvariantCulture));
+            }
+            if (!string.IsNullOrEmpty(previewError))
+                builder.AppendLine("Preview error: " + previewError);
+            if (!string.IsNullOrEmpty(timeline))
+            {
+                builder.AppendLine("Critical timeline:");
+                builder.Append(timeline);
             }
             return builder.ToString();
         }

@@ -217,7 +217,7 @@ namespace MacacaGames.RuntimeBugReporter
                     var duration = Math.Max(1d / Math.Max(1, settings.videoFramesPerSecond), incidentEndTime - startTime);
                     result = new VideoCaptureResult(outputPath, ".mp4", "video/mp4", duration,
                         Math.Max(1, Mathf.RoundToInt((float)(duration * settings.videoFramesPerSecond))),
-                        "Windows D3D11 Media Foundation H.264");
+                        "Windows D3D11 Media Foundation H.264", width, height);
                 }
                 else
                     TryDelete(outputPath);

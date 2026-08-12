@@ -79,8 +79,18 @@ namespace MacacaGames.RuntimeBugReporter
         public readonly double DurationSeconds;
         public readonly int FrameCount;
         public readonly string EncoderName;
+        public readonly int Width;
+        public readonly int Height;
 
-        public VideoCaptureResult(string filePath, string extension, string mimeType, double durationSeconds, int frameCount, string encoderName)
+        public VideoCaptureResult(
+            string filePath,
+            string extension,
+            string mimeType,
+            double durationSeconds,
+            int frameCount,
+            string encoderName,
+            int width = 0,
+            int height = 0)
         {
             FilePath = filePath;
             Extension = extension;
@@ -88,6 +98,8 @@ namespace MacacaGames.RuntimeBugReporter
             DurationSeconds = durationSeconds;
             FrameCount = frameCount;
             EncoderName = encoderName;
+            Width = width;
+            Height = height;
         }
 
         public void DeleteFile()
