@@ -10,6 +10,7 @@ namespace MacacaGames.RuntimeBugReporter
         internal static IBugReportTransport TransportOverride;
         internal static IVideoEncoderBackend VideoEncoderOverride;
         internal static bool SoftwareCursorEnabled { get; private set; } = true;
+        internal static bool HandheldModeEnabled { get; private set; }
 
         public static bool IsOpen => BugReporterController.Instance != null && BugReporterController.Instance.IsOpen;
 
@@ -71,6 +72,17 @@ namespace MacacaGames.RuntimeBugReporter
             SoftwareCursorEnabled = enabled;
         }
 
+        /// <summary>
+        /// Selects the touch-oriented entry presentation and disables the
+        /// desktop software cursor for a host-identified PC handheld. This
+        /// session-only override does not create the reporter or require a
+        /// platform SDK.
+        /// </summary>
+        public static void SetHandheldMode(bool enabled)
+        {
+            HandheldModeEnabled = enabled;
+        }
+
         public static void RegisterDataProvider(IBugReportDataProvider provider)
         {
             if (provider != null && !Providers.Contains(provider))
@@ -112,6 +124,7 @@ namespace MacacaGames.RuntimeBugReporter
         private static void ResetSessionState()
         {
             SoftwareCursorEnabled = true;
+            HandheldModeEnabled = false;
         }
 
         internal static bool IsEnabled(BugReporterSettings settings)

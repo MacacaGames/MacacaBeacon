@@ -432,16 +432,16 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.EndArea();
         }
 
-        internal static bool IsSoftwareCursorPlatform(bool isMobilePlatform, DeviceType deviceType)
+        internal static bool IsSoftwareCursorPlatform(bool isMobilePlatform, DeviceType deviceType, bool handheldModeEnabled)
         {
-            return !isMobilePlatform && deviceType != DeviceType.Handheld && deviceType != DeviceType.Console;
+            return !isMobilePlatform && !handheldModeEnabled && deviceType != DeviceType.Handheld && deviceType != DeviceType.Console;
         }
 
         private static bool IsSoftwareCursorActive()
         {
             return ShouldUseSoftwareCursor(
                 BugReporter.SoftwareCursorEnabled,
-                IsSoftwareCursorPlatform(Application.isMobilePlatform, SystemInfo.deviceType),
+                IsSoftwareCursorPlatform(Application.isMobilePlatform, SystemInfo.deviceType, BugReporter.HandheldModeEnabled),
                 Cursor.visible,
                 Cursor.lockState);
         }
@@ -2084,8 +2084,13 @@ namespace MacacaGames.RuntimeBugReporter
 #if UNITY_IOS || UNITY_ANDROID
             return true;
 #else
-            return Application.isMobilePlatform;
+            return UsesTouchEntryPresentation(Application.isMobilePlatform, BugReporter.HandheldModeEnabled);
 #endif
+        }
+
+        internal static bool UsesTouchEntryPresentation(bool isMobilePlatform, bool handheldModeEnabled)
+        {
+            return isMobilePlatform || handheldModeEnabled;
         }
 
         private void DrawEntryButton()
