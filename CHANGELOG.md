@@ -18,6 +18,8 @@
 - Preserved a bounded video backend/fallback timeline in diagnostics independently from recent gameplay logs, including screen/output dimensions, frame count, duration, and effective FPS.
 - Enabled non-WebGL report pages to attempt managed MJPEG AVI preview through the existing Unity `VideoPlayer`, while keeping valid files attachable when the platform decoder rejects them.
 - Documented that `Video Width` intentionally scales output resolution while preserving aspect ratio instead of changing native screen resolution or capture performance policy.
+- Fixed generic fallback capture on Proton/D3D by explicitly scaling the complete backbuffer before readback, without changing preferred macOS or Windows GPU recording.
+- Added a bounded managed fallback for MacacaBeacon-authored MJPEG AVI when `VideoPlayer` errors or returns implausible duration, frame, or aspect metadata; working native Windows AVI, MP4, and other AVI encoders keep the existing `VideoPlayer` path.
 
 ## 0.5.1
 

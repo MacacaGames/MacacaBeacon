@@ -324,7 +324,10 @@ namespace MacacaGames.RuntimeBugReporter
                 if (frame == null)
                 {
                     frameFormat = VideoCaptureFrameFormat.Jpeg;
-                    yield return CaptureUtility.CaptureScaledJpegAsync(settings.videoWidth, settings.videoJpegQuality, value => frame = value);
+                    yield return CaptureUtility.CaptureScaledJpegAsync(
+                        settings.videoWidth,
+                        settings.videoJpegQuality,
+                        value => frame = value);
                     frameWidth = Mathf.Max(2, Mathf.Min(settings.videoWidth, Screen.width));
                     frameWidth -= frameWidth % 2;
                     frameHeight = Mathf.RoundToInt(Screen.height * (frameWidth / (float)Mathf.Max(1, Screen.width)));

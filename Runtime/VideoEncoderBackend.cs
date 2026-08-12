@@ -17,6 +17,8 @@ namespace MacacaGames.RuntimeBugReporter
 
     internal static class VideoEncoderBackend
     {
+        internal const string ManagedAviEncoderName = "Managed MJPEG AVI fallback";
+
         public static VideoCaptureResult Encode(
             string outputStem,
             IReadOnlyList<VideoCaptureFrame> frames,
@@ -115,7 +117,7 @@ namespace MacacaGames.RuntimeBugReporter
 
                 var outputPath = outputStem + ".avi";
                 File.WriteAllBytes(outputPath, bytes);
-                return new VideoCaptureResult(outputPath, ".avi", "video/x-msvideo", durationSeconds, frames.Count, "Managed MJPEG AVI fallback", width, height);
+                return new VideoCaptureResult(outputPath, ".avi", "video/x-msvideo", durationSeconds, frames.Count, ManagedAviEncoderName, width, height);
             }
             catch (Exception exception)
             {

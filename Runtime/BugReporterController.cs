@@ -47,6 +47,7 @@ namespace MacacaGames.RuntimeBugReporter
         private byte[] screenshotBytes;
         private VideoCaptureResult videoCapture;
         private VideoPlayer videoPlayer;
+        private ManagedMjpegAviPreview managedAviPreview;
         private string preparedVideoPath;
         private string videoPreviewError;
         private string videoPreviewDiagnosticError;
@@ -202,6 +203,12 @@ namespace MacacaGames.RuntimeBugReporter
 
         private void Update()
         {
+            if (IsOpen && !isSending && captureTabIndex == 1 && managedAviPreview != null)
+            {
+                managedAviPreview.Update(Time.unscaledDeltaTime);
+                if (!string.IsNullOrEmpty(managedAviPreview.Error))
+                    SetVideoPreviewError(managedAviPreview.Error);
+            }
             if (IsOpen && !isSending && videoCapture == null && videoRecorder != null && videoRecorder.IsEncoding)
             {
                 statusIsError = false;
@@ -1079,6 +1086,7 @@ namespace MacacaGames.RuntimeBugReporter
                 softwareCursorVideoPreviewTime = null;
                 if (videoPlayer != null && videoPlayer.isPlaying)
                     videoPlayer.Pause();
+                managedAviPreview?.Pause();
             }
 
             GUILayout.Space(10f * styleScale);
@@ -1163,7 +1171,7 @@ namespace MacacaGames.RuntimeBugReporter
             if (reviewState == VideoReviewState.Ready)
                 EnsureVideoPreview();
 
-            var texture = videoPlayer != null && videoPlayer.isPrepared ? videoPlayer.texture : null;
+            var texture = PreviewTexture();
             if (reviewState == VideoReviewState.Ready && texture != null)
             {
                 var imageRect = new Rect(rect.x + 3f, rect.y + 3f, rect.width - 6f, rect.height - 6f);
@@ -1178,7 +1186,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         private void DrawVideoInteraction(Rect imageRect)
         {
-            var duration = videoPlayer.length > 0d ? videoPlayer.length : videoCapture.DurationSeconds;
+            var duration = PreviewDuration();
             var overlayHeight = (IsMobileLayout() ? 52f : 44f) * styleScale;
             var overlayRect = new Rect(imageRect.x, imageRect.yMax - overlayHeight, imageRect.width, overlayHeight);
             var horizontalPadding = 14f * styleScale;
@@ -1195,7 +1203,7 @@ namespace MacacaGames.RuntimeBugReporter
             var isSeeking = IsSoftwareCursorActive()
                 ? softwareCursorPressedControl == seekControlId
                 : GUIUtility.hotControl == seekControlId;
-            var showControls = !videoPlayer.isPlaying || pointerOverVideo || isSeeking;
+            var showControls = !PreviewIsPlaying() || pointerOverVideo || isSeeking;
 
             if (showControls)
             {
@@ -1237,7 +1245,7 @@ namespace MacacaGames.RuntimeBugReporter
             GUI.color = new Color(1f, 1f, 1f, 0.38f);
             GUI.DrawTexture(trackRect, Texture2D.whiteTexture);
 
-            var displayedTime = softwareCursorVideoPreviewTime ?? videoPlayer.time;
+            var displayedTime = softwareCursorVideoPreviewTime ?? PreviewTime();
             var progress = duration > 0d ? Mathf.Clamp01((float)(displayedTime / duration)) : 0f;
             var playedRect = new Rect(trackRect.x, trackRect.y, trackRect.width * progress, trackRect.height);
             GUI.color = new Color(0.09f, 0.70f, 0.72f, 1f);
@@ -1264,7 +1272,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         private void HandleVideoSeek(int controlId, Rect hitRect, double duration)
         {
-            if (isSending || !videoPlayer.canSetTime || duration <= 0d)
+            if (isSending || !PreviewCanSetTime() || duration <= 0d)
                 return;
 
             if (IsSoftwareCursorActive())
@@ -1286,7 +1294,7 @@ namespace MacacaGames.RuntimeBugReporter
                         duration);
                     if (ShouldCommitSoftwareCursorVideoSeek(softwareCursorButtonState))
                     {
-                        videoPlayer.time = softwareCursorVideoPreviewTime.Value;
+                        SetPreviewTime(softwareCursorVideoPreviewTime.Value);
                         softwareCursorVideoPreviewTime = null;
                     }
                 }
@@ -1321,7 +1329,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         private void SeekVideo(float pointerX, Rect trackRect, double duration)
         {
-            videoPlayer.time = VideoTimeFromPointer(pointerX, trackRect.xMin, trackRect.width, duration);
+            SetPreviewTime(VideoTimeFromPointer(pointerX, trackRect.xMin, trackRect.width, duration));
         }
 
         internal static bool ShouldActivateSoftwareCursorVideoSurface(
@@ -1341,25 +1349,36 @@ namespace MacacaGames.RuntimeBugReporter
 
         private void ToggleVideoPlayback()
         {
-            if (videoPlayer.isPlaying)
+            if (managedAviPreview != null)
+            {
+                if (managedAviPreview.IsPlaying)
+                    managedAviPreview.Pause();
+                else
+                    managedAviPreview.Play();
+                return;
+            }
+
+            if (videoPlayer != null && videoPlayer.isPlaying)
             {
                 videoPlayer.Pause();
                 return;
             }
 
-            if (videoPlayer.length > 0d && videoPlayer.time >= videoPlayer.length - 0.05d)
+            if (videoPlayer != null && videoPlayer.length > 0d && videoPlayer.time >= videoPlayer.length - 0.05d)
                 videoPlayer.time = 0d;
-            videoPlayer.Play();
+            videoPlayer?.Play();
         }
 
         private void EnsureVideoPreview()
         {
             if (isSending || !HasVideoCaptureFile(videoCapture) || !CanPreviewVideo(videoCapture.Extension, IsWebGlPlayer()))
                 return;
-            if (videoPlayer != null && preparedVideoPath == videoCapture.FilePath)
+            if (preparedVideoPath == videoCapture.FilePath &&
+                (managedAviPreview != null || videoPlayer != null))
                 return;
 
             ResetVideoPreview();
+            preparedVideoPath = videoCapture.FilePath;
             if (videoPlayer == null)
             {
                 videoPlayer = gameObject.AddComponent<VideoPlayer>();
@@ -1372,7 +1391,6 @@ namespace MacacaGames.RuntimeBugReporter
                 videoPlayer.errorReceived += OnVideoError;
             }
 
-            preparedVideoPath = videoCapture.FilePath;
             videoPlayer.source = VideoSource.Url;
             videoPlayer.url = preparedVideoPath;
             videoPlayer.Prepare();
@@ -1381,6 +1399,8 @@ namespace MacacaGames.RuntimeBugReporter
         private void ResetVideoPreview()
         {
             softwareCursorVideoPreviewTime = null;
+            managedAviPreview?.Dispose();
+            managedAviPreview = null;
             if (videoPlayer != null)
             {
                 videoPlayer.frameReady -= OnVideoFirstFrameReady;
@@ -1396,6 +1416,25 @@ namespace MacacaGames.RuntimeBugReporter
         {
             if (source == videoPlayer && source.url == preparedVideoPath)
             {
+                if (ShouldFallbackToManagedMjpegPreview(
+                        videoCapture,
+                        IsWebGlPlayer(),
+                        source.length,
+                        source.width,
+                        source.height,
+                        source.frameCount))
+                {
+                    RecoverManagedMjpegPreview(
+                        "Unity decoder returned metadata inconsistent with the capture" +
+                        " (decoded " + source.width + "x" + source.height +
+                        ", " + source.length.ToString("0.00", CultureInfo.InvariantCulture) + "s" +
+                        ", " + source.frameCount + " frames; expected " +
+                        videoCapture.Width + "x" + videoCapture.Height +
+                        ", " + videoCapture.DurationSeconds.ToString("0.00", CultureInfo.InvariantCulture) + "s" +
+                        ", " + videoCapture.FrameCount + " frames)."
+                    );
+                    return;
+                }
                 videoPreviewError = null;
                 source.frameReady -= OnVideoFirstFrameReady;
                 source.frameReady += OnVideoFirstFrameReady;
@@ -1417,12 +1456,52 @@ namespace MacacaGames.RuntimeBugReporter
             if (source == videoPlayer && source.url == preparedVideoPath)
             {
                 softwareCursorVideoPreviewTime = null;
-                videoPreviewError = string.IsNullOrEmpty(message) ? "Unity could not preview this video." : message;
-                videoPreviewDiagnosticError = videoPreviewError;
-                Debug.LogWarning("[Macaca Beacon] Video preview failed: " + videoPreviewError);
+                var error = string.IsNullOrEmpty(message) ? "Unity could not preview this video." : message;
+                if (RecoverManagedMjpegPreview(error))
+                    return;
+                SetVideoPreviewError(error);
                 source.Stop();
                 source.url = string.Empty;
             }
+        }
+
+        private bool RecoverManagedMjpegPreview(string decoderError)
+        {
+            if (!CanUseManagedMjpegFallback(videoCapture, IsWebGlPlayer()))
+                return false;
+
+            if (videoPlayer != null)
+            {
+                videoPlayer.frameReady -= OnVideoFirstFrameReady;
+                videoPlayer.sendFrameReadyEvents = false;
+                videoPlayer.Stop();
+                videoPlayer.url = string.Empty;
+            }
+            var maximumBytes = Math.Max(1L, settings.maximumAttachmentMegabytes) * 1024L * 1024L;
+            if (ManagedMjpegAviPreview.TryCreate(
+                    preparedVideoPath,
+                    videoCapture.DurationSeconds,
+                    maximumBytes,
+                    out managedAviPreview,
+                    out var fallbackError))
+            {
+                videoPreviewError = null;
+                Debug.LogWarning("[Macaca Beacon] " + decoderError + " Using managed MJPEG preview fallback.");
+                return true;
+            }
+
+            SetVideoPreviewError(decoderError + " Managed MJPEG fallback failed: " + fallbackError);
+            return true;
+        }
+
+        private void SetVideoPreviewError(string message)
+        {
+            if (!string.IsNullOrEmpty(videoPreviewError))
+                return;
+            videoPreviewError = string.IsNullOrEmpty(message) ? "Video preview failed." : message;
+            videoPreviewDiagnosticError = videoPreviewError;
+            Debug.LogWarning("[Macaca Beacon] Video preview failed: " + videoPreviewError);
+            managedAviPreview?.Pause();
         }
 
         private VideoReviewState CurrentVideoReviewState()
@@ -1475,6 +1554,48 @@ namespace MacacaGames.RuntimeBugReporter
                     string.Equals(extension, ".avi", StringComparison.OrdinalIgnoreCase));
         }
 
+        internal static bool CanUseManagedMjpegFallback(VideoCaptureResult capture, bool webGlPlayer)
+        {
+            return !webGlPlayer && capture != null &&
+                   string.Equals(capture.Extension, ".avi", StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(capture.EncoderName, VideoEncoderBackend.ManagedAviEncoderName, StringComparison.Ordinal);
+        }
+
+        internal static bool ShouldFallbackToManagedMjpegPreview(
+            VideoCaptureResult capture,
+            bool webGlPlayer,
+            double decodedDuration,
+            ulong decodedWidth,
+            ulong decodedHeight,
+            ulong decodedFrameCount)
+        {
+            if (!CanUseManagedMjpegFallback(capture, webGlPlayer))
+                return false;
+
+            if (capture.DurationSeconds > 0d)
+            {
+                var durationTolerance = Math.Max(0.75d, capture.DurationSeconds * 0.2d);
+                if (decodedDuration <= 0d || Math.Abs(decodedDuration - capture.DurationSeconds) > durationTolerance)
+                    return true;
+            }
+
+            if (capture.Width > 0 && capture.Height > 0 && decodedWidth > 0 && decodedHeight > 0)
+            {
+                var expectedAspect = capture.Width / (double)capture.Height;
+                var decodedAspect = decodedWidth / (double)decodedHeight;
+                if (Math.Abs(decodedAspect - expectedAspect) / expectedAspect > 0.03d)
+                    return true;
+            }
+
+            if (capture.FrameCount > 0 && decodedFrameCount > 0 && decodedFrameCount != ulong.MaxValue)
+            {
+                var frameTolerance = Math.Max(2d, capture.FrameCount * 0.25d);
+                if (Math.Abs(decodedFrameCount - (double)capture.FrameCount) > frameTolerance)
+                    return true;
+            }
+            return false;
+        }
+
         internal static double VideoTimeFromPointer(double pointerX, double trackX, double trackWidth, double duration)
         {
             if (trackWidth <= 0d || duration <= 0d)
@@ -1508,10 +1629,56 @@ namespace MacacaGames.RuntimeBugReporter
                         ? "No video was recorded.\nYou can still send the screenshot and diagnostics."
                         : "Video recording was disabled when this report opened.";
                 default:
-                    return videoPlayer != null && videoPlayer.isPrepared
+                    return PreviewIsPrepared()
                         ? string.Empty
                         : "Preparing video preview…";
             }
+        }
+
+        private Texture PreviewTexture()
+        {
+            if (managedAviPreview != null && managedAviPreview.IsPrepared)
+                return managedAviPreview.Texture;
+            return videoPlayer != null && videoPlayer.isPrepared ? videoPlayer.texture : null;
+        }
+
+        private bool PreviewIsPrepared()
+        {
+            return managedAviPreview != null ? managedAviPreview.IsPrepared : videoPlayer != null && videoPlayer.isPrepared;
+        }
+
+        private bool PreviewIsPlaying()
+        {
+            return managedAviPreview != null ? managedAviPreview.IsPlaying : videoPlayer != null && videoPlayer.isPlaying;
+        }
+
+        private bool PreviewCanSetTime()
+        {
+            return managedAviPreview != null ? managedAviPreview.IsPrepared : videoPlayer != null && videoPlayer.canSetTime;
+        }
+
+        private double PreviewDuration()
+        {
+            if (managedAviPreview != null)
+                return managedAviPreview.Duration;
+            return videoPlayer != null && videoPlayer.length > 0d ? videoPlayer.length : videoCapture.DurationSeconds;
+        }
+
+        private double PreviewTime()
+        {
+            return managedAviPreview != null ? managedAviPreview.Time : videoPlayer != null ? videoPlayer.time : 0d;
+        }
+
+        private void SetPreviewTime(double time)
+        {
+            if (managedAviPreview != null)
+            {
+                if (!managedAviPreview.Seek(time))
+                    SetVideoPreviewError(managedAviPreview.Error);
+                return;
+            }
+            if (videoPlayer != null)
+                videoPlayer.time = time;
         }
 
         private static string VideoReviewStatusLabel(VideoReviewState state)
