@@ -109,7 +109,7 @@ namespace MacacaGames.RuntimeBugReporter
                 if (incidentPending && Time.realtimeSinceStartupAsDouble >= incidentEndTime)
                 {
                     yield return FinalizeIncident();
-                    yield break;
+                    continue;
                 }
                 if (!frame.IsValid)
                 {
