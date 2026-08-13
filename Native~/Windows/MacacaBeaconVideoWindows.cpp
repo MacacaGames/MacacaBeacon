@@ -155,6 +155,15 @@ namespace
     using VulkanGetPhysicalDeviceQueueFamilyProperties2 = void (WINAPI*)(
         void*, uint32_t*, VulkanQueueFamilyProperties2*);
 
+    struct DxvkInteropFactoryProbe : public IUnknown
+    {
+        virtual void STDMETHODCALLTYPE GetVulkanInstance(
+            void** instance, VulkanGetInstanceProcAddr* getInstanceProcAddr) = 0;
+    };
+
+    const IID IID_DxvkInteropFactoryProbe =
+        { 0x4c5e1b0d, 0xb0c8, 0x4131, { 0xbf, 0xd8, 0x9b, 0x24, 0x76, 0xf7, 0xf4, 0x08 } };
+
     template <typename Target, typename Source>
     Target FunctionPointerCast(Source source)
     {
@@ -173,6 +182,56 @@ namespace
                 return true;
         }
         return false;
+    }
+
+    HRESULT GetDxvkInstanceProcAddr(
+        ID3D11Texture2D* texture,
+        void* expectedInstance,
+        VulkanGetInstanceProcAddr& getInstanceProcAddr,
+        bool& instanceMatches)
+    {
+        getInstanceProcAddr = nullptr;
+        instanceMatches = false;
+        if (texture == nullptr || expectedInstance == nullptr)
+            return E_POINTER;
+
+        ID3D11Device* d3dDevice = nullptr;
+        IDXGIDevice* dxgiDevice = nullptr;
+        IDXGIAdapter* adapter = nullptr;
+        IDXGIFactory* factory = nullptr;
+        DxvkInteropFactoryProbe* interopFactory = nullptr;
+        texture->GetDevice(&d3dDevice);
+        HRESULT result = d3dDevice == nullptr
+            ? E_POINTER
+            : d3dDevice->QueryInterface(IID_PPV_ARGS(&dxgiDevice));
+        if (SUCCEEDED(result))
+            result = dxgiDevice->GetAdapter(&adapter);
+        if (SUCCEEDED(result))
+            result = adapter->GetParent(IID_PPV_ARGS(&factory));
+        if (SUCCEEDED(result))
+        {
+            result = factory->QueryInterface(
+                IID_DxvkInteropFactoryProbe, reinterpret_cast<void**>(&interopFactory));
+        }
+
+        void* factoryInstance = nullptr;
+        if (SUCCEEDED(result))
+        {
+            interopFactory->GetVulkanInstance(&factoryInstance, &getInstanceProcAddr);
+            instanceMatches = factoryInstance == expectedInstance;
+            if (!instanceMatches || getInstanceProcAddr == nullptr)
+            {
+                getInstanceProcAddr = nullptr;
+                result = E_NOINTERFACE;
+            }
+        }
+
+        SafeRelease(interopFactory);
+        SafeRelease(factory);
+        SafeRelease(adapter);
+        SafeRelease(dxgiDevice);
+        SafeRelease(d3dDevice);
+        return result;
     }
 
     std::string ProbeDxvkVulkanVideo(ID3D11Texture2D* texture)
@@ -197,18 +256,10 @@ namespace
         if (SUCCEEDED(deviceResult) && interopDevice != nullptr)
             interopDevice->GetVulkanHandles(&instance, &physicalDevice, &device);
 
-        HMODULE vulkanModule = GetModuleHandleW(L"vulkan-1.dll");
-        bool releaseVulkanModule = false;
-        if (vulkanModule == nullptr)
-        {
-            vulkanModule = LoadLibraryW(L"vulkan-1.dll");
-            releaseVulkanModule = vulkanModule != nullptr;
-        }
-
-        VulkanGetInstanceProcAddr getInstanceProcAddr = vulkanModule == nullptr
-            ? nullptr
-            : FunctionPointerCast<VulkanGetInstanceProcAddr>(
-                GetProcAddress(vulkanModule, "vkGetInstanceProcAddr"));
+        VulkanGetInstanceProcAddr getInstanceProcAddr = nullptr;
+        bool instanceMatches = false;
+        const HRESULT loaderResult = GetDxvkInstanceProcAddr(
+            texture, instance, getInstanceProcAddr, instanceMatches);
         VulkanEnumerateDeviceExtensionProperties enumerateExtensions = nullptr;
         VulkanGetPhysicalDeviceQueueFamilyProperties2 getQueueFamilies = nullptr;
         VulkanGetDeviceProcAddr getDeviceProcAddr = nullptr;
@@ -292,15 +343,14 @@ namespace
             }
         }
 
-        if (releaseVulkanModule)
-            FreeLibrary(vulkanModule);
         SafeRelease(interopDevice);
         SafeRelease(surface);
 
         char summary[640] = {};
         sprintf_s(summary,
-            " Vulkan Video probe: loader=%u, DXVK surface=%u (HRESULT 0x%08lX), device=%u (HRESULT 0x%08lX), image=%u (HRESULT 0x%08lX), handles=%u, extensions(video=%u, encode=%u, H.264=%u, result=%ld), H.264 queues=%u, device functions=%u/%zu.",
+            " Vulkan Video probe: DXVK loader=%u (HRESULT 0x%08lX, instance match=%u), surface=%u (HRESULT 0x%08lX), device=%u (HRESULT 0x%08lX), image=%u (HRESULT 0x%08lX), handles=%u, extensions(video=%u, encode=%u, H.264=%u, result=%ld), H.264 queues=%u, device functions=%u/%zu.",
             getInstanceProcAddr != nullptr ? 1u : 0u,
+            static_cast<unsigned long>(loaderResult), instanceMatches ? 1u : 0u,
             SUCCEEDED(surfaceResult) ? 1u : 0u, static_cast<unsigned long>(surfaceResult),
             SUCCEEDED(deviceResult) ? 1u : 0u, static_cast<unsigned long>(deviceResult),
             SUCCEEDED(imageResult) && image != 0 ? 1u : 0u, static_cast<unsigned long>(imageResult),
