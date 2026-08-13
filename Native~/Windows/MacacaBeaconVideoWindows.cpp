@@ -85,7 +85,233 @@ namespace
         return message;
     }
 
-    std::string ProbeDx11H264Encoders()
+    // Minimal ABI used only to inspect the DXVK resource already backing Unity's
+    // D3D11 capture texture. The GUIDs and method order are published by DXVK.
+    struct DxvkInteropDeviceProbe;
+
+    struct DxvkInteropSurfaceProbe : public IUnknown
+    {
+        virtual HRESULT STDMETHODCALLTYPE GetDevice(DxvkInteropDeviceProbe** device) = 0;
+        virtual HRESULT STDMETHODCALLTYPE GetVulkanImageInfo(
+            uint64_t* image, int32_t* layout, void* imageCreateInfo) = 0;
+    };
+
+    struct DxvkInteropDeviceProbe : public IUnknown
+    {
+        virtual void STDMETHODCALLTYPE GetVulkanHandles(
+            void** instance, void** physicalDevice, void** device) = 0;
+        virtual void STDMETHODCALLTYPE GetSubmissionQueue(void** queue, uint32_t* queueFamilyIndex) = 0;
+        virtual void STDMETHODCALLTYPE TransitionSurfaceLayout(
+            DxvkInteropSurfaceProbe* surface, const void* subresources,
+            int32_t oldLayout, int32_t newLayout) = 0;
+        virtual void STDMETHODCALLTYPE FlushRenderingCommands() = 0;
+        virtual void STDMETHODCALLTYPE LockSubmissionQueue() = 0;
+        virtual void STDMETHODCALLTYPE ReleaseSubmissionQueue() = 0;
+    };
+
+    const IID IID_DxvkInteropSurfaceProbe =
+        { 0x5546cf8c, 0x77e7, 0x4341, { 0xb0, 0x5d, 0x8d, 0x4d, 0x50, 0x00, 0xe7, 0x7d } };
+
+    struct VulkanExtensionProperties
+    {
+        char extensionName[256];
+        uint32_t specVersion;
+    };
+
+    struct VulkanExtent3D
+    {
+        uint32_t width;
+        uint32_t height;
+        uint32_t depth;
+    };
+
+    struct VulkanQueueFamilyProperties
+    {
+        uint32_t queueFlags;
+        uint32_t queueCount;
+        uint32_t timestampValidBits;
+        VulkanExtent3D minImageTransferGranularity;
+    };
+
+    struct VulkanQueueFamilyVideoProperties
+    {
+        int32_t sType;
+        void* pNext;
+        uint32_t videoCodecOperations;
+    };
+
+    struct VulkanQueueFamilyProperties2
+    {
+        int32_t sType;
+        void* pNext;
+        VulkanQueueFamilyProperties queueFamilyProperties;
+    };
+
+    using VulkanFunction = void (WINAPI*)();
+    using VulkanGetInstanceProcAddr = VulkanFunction (WINAPI*)(void*, const char*);
+    using VulkanGetDeviceProcAddr = VulkanFunction (WINAPI*)(void*, const char*);
+    using VulkanEnumerateDeviceExtensionProperties = int32_t (WINAPI*)(
+        void*, const char*, uint32_t*, VulkanExtensionProperties*);
+    using VulkanGetPhysicalDeviceQueueFamilyProperties2 = void (WINAPI*)(
+        void*, uint32_t*, VulkanQueueFamilyProperties2*);
+
+    template <typename Target, typename Source>
+    Target FunctionPointerCast(Source source)
+    {
+        static_assert(sizeof(Target) == sizeof(Source), "Function pointer sizes must match");
+        Target target = nullptr;
+        std::memcpy(&target, &source, sizeof(target));
+        return target;
+    }
+
+    bool HasVulkanExtension(
+        const std::vector<VulkanExtensionProperties>& extensions, const char* expected)
+    {
+        for (const VulkanExtensionProperties& extension : extensions)
+        {
+            if (std::strcmp(extension.extensionName, expected) == 0)
+                return true;
+        }
+        return false;
+    }
+
+    std::string ProbeDxvkVulkanVideo(ID3D11Texture2D* texture)
+    {
+        DxvkInteropSurfaceProbe* surface = nullptr;
+        DxvkInteropDeviceProbe* interopDevice = nullptr;
+        HRESULT surfaceResult = texture == nullptr
+            ? E_POINTER
+            : texture->QueryInterface(IID_DxvkInteropSurfaceProbe, reinterpret_cast<void**>(&surface));
+        HRESULT deviceResult = E_NOINTERFACE;
+        HRESULT imageResult = E_NOINTERFACE;
+        void* instance = nullptr;
+        void* physicalDevice = nullptr;
+        void* device = nullptr;
+        uint64_t image = 0;
+        int32_t imageLayout = 0;
+        if (SUCCEEDED(surfaceResult))
+        {
+            deviceResult = surface->GetDevice(&interopDevice);
+            imageResult = surface->GetVulkanImageInfo(&image, &imageLayout, nullptr);
+        }
+        if (SUCCEEDED(deviceResult) && interopDevice != nullptr)
+            interopDevice->GetVulkanHandles(&instance, &physicalDevice, &device);
+
+        HMODULE vulkanModule = GetModuleHandleW(L"vulkan-1.dll");
+        bool releaseVulkanModule = false;
+        if (vulkanModule == nullptr)
+        {
+            vulkanModule = LoadLibraryW(L"vulkan-1.dll");
+            releaseVulkanModule = vulkanModule != nullptr;
+        }
+
+        VulkanGetInstanceProcAddr getInstanceProcAddr = vulkanModule == nullptr
+            ? nullptr
+            : FunctionPointerCast<VulkanGetInstanceProcAddr>(
+                GetProcAddress(vulkanModule, "vkGetInstanceProcAddr"));
+        VulkanEnumerateDeviceExtensionProperties enumerateExtensions = nullptr;
+        VulkanGetPhysicalDeviceQueueFamilyProperties2 getQueueFamilies = nullptr;
+        VulkanGetDeviceProcAddr getDeviceProcAddr = nullptr;
+        if (getInstanceProcAddr != nullptr && instance != nullptr)
+        {
+            enumerateExtensions = FunctionPointerCast<VulkanEnumerateDeviceExtensionProperties>(
+                getInstanceProcAddr(instance, "vkEnumerateDeviceExtensionProperties"));
+            getQueueFamilies = FunctionPointerCast<VulkanGetPhysicalDeviceQueueFamilyProperties2>(
+                getInstanceProcAddr(instance, "vkGetPhysicalDeviceQueueFamilyProperties2"));
+            if (getQueueFamilies == nullptr)
+            {
+                getQueueFamilies = FunctionPointerCast<VulkanGetPhysicalDeviceQueueFamilyProperties2>(
+                    getInstanceProcAddr(instance, "vkGetPhysicalDeviceQueueFamilyProperties2KHR"));
+            }
+            getDeviceProcAddr = FunctionPointerCast<VulkanGetDeviceProcAddr>(
+                getInstanceProcAddr(instance, "vkGetDeviceProcAddr"));
+        }
+
+        std::vector<VulkanExtensionProperties> extensions;
+        int32_t extensionResult = -1;
+        uint32_t extensionCount = 0;
+        if (enumerateExtensions != nullptr && physicalDevice != nullptr)
+        {
+            extensionResult = enumerateExtensions(physicalDevice, nullptr, &extensionCount, nullptr);
+            if ((extensionResult == 0 || extensionResult == 5) && extensionCount > 0)
+            {
+                extensions.resize(extensionCount);
+                extensionResult = enumerateExtensions(
+                    physicalDevice, nullptr, &extensionCount, extensions.data());
+                extensions.resize(std::min<size_t>(extensions.size(), extensionCount));
+            }
+        }
+
+        const bool videoQueueExtension = HasVulkanExtension(extensions, "VK_KHR_video_queue");
+        const bool videoEncodeExtension = HasVulkanExtension(extensions, "VK_KHR_video_encode_queue");
+        const bool h264Extension = HasVulkanExtension(extensions, "VK_KHR_video_encode_h264");
+        uint32_t h264QueueCount = 0;
+        if (videoQueueExtension && videoEncodeExtension && h264Extension &&
+            getQueueFamilies != nullptr && physicalDevice != nullptr)
+        {
+            uint32_t queueCount = 0;
+            getQueueFamilies(physicalDevice, &queueCount, nullptr);
+            std::vector<VulkanQueueFamilyProperties2> queues(queueCount);
+            std::vector<VulkanQueueFamilyVideoProperties> videoQueues(queueCount);
+            for (uint32_t index = 0; index < queueCount; ++index)
+            {
+                videoQueues[index].sType = 1000023012;
+                queues[index].sType = 1000059005;
+                queues[index].pNext = &videoQueues[index];
+            }
+            if (queueCount > 0)
+                getQueueFamilies(physicalDevice, &queueCount, queues.data());
+            for (uint32_t index = 0; index < queueCount; ++index)
+            {
+                const bool videoEncodeQueue =
+                    (queues[index].queueFamilyProperties.queueFlags & 0x00000040u) != 0;
+                const bool h264Encode =
+                    (videoQueues[index].videoCodecOperations & 0x00010000u) != 0;
+                if (videoEncodeQueue && h264Encode)
+                    ++h264QueueCount;
+            }
+        }
+
+        const char* requiredFunctions[] = {
+            "vkCreateVideoSessionKHR",
+            "vkDestroyVideoSessionKHR",
+            "vkGetVideoSessionMemoryRequirementsKHR",
+            "vkBindVideoSessionMemoryKHR",
+            "vkCmdBeginVideoCodingKHR",
+            "vkCmdControlVideoCodingKHR",
+            "vkCmdEncodeVideoKHR",
+            "vkCmdEndVideoCodingKHR",
+        };
+        uint32_t deviceFunctionCount = 0;
+        if (getDeviceProcAddr != nullptr && device != nullptr)
+        {
+            for (const char* functionName : requiredFunctions)
+            {
+                if (getDeviceProcAddr(device, functionName) != nullptr)
+                    ++deviceFunctionCount;
+            }
+        }
+
+        if (releaseVulkanModule)
+            FreeLibrary(vulkanModule);
+        SafeRelease(interopDevice);
+        SafeRelease(surface);
+
+        char summary[640] = {};
+        sprintf_s(summary,
+            " Vulkan Video probe: loader=%u, DXVK surface=%u (HRESULT 0x%08lX), device=%u (HRESULT 0x%08lX), image=%u (HRESULT 0x%08lX), handles=%u, extensions(video=%u, encode=%u, H.264=%u, result=%ld), H.264 queues=%u, device functions=%u/%zu.",
+            getInstanceProcAddr != nullptr ? 1u : 0u,
+            SUCCEEDED(surfaceResult) ? 1u : 0u, static_cast<unsigned long>(surfaceResult),
+            SUCCEEDED(deviceResult) ? 1u : 0u, static_cast<unsigned long>(deviceResult),
+            SUCCEEDED(imageResult) && image != 0 ? 1u : 0u, static_cast<unsigned long>(imageResult),
+            instance != nullptr && physicalDevice != nullptr && device != nullptr ? 1u : 0u,
+            videoQueueExtension ? 1u : 0u, videoEncodeExtension ? 1u : 0u,
+            h264Extension ? 1u : 0u, static_cast<long>(extensionResult),
+            h264QueueCount, deviceFunctionCount, std::size(requiredFunctions));
+        return summary;
+    }
+
+    std::string ProbeDx11H264Encoders(bool& hasQualifyingHardwareEncoder)
     {
         const MFT_REGISTER_TYPE_INFO input = { MFMediaType_Video, MFVideoFormat_NV12 };
         const MFT_REGISTER_TYPE_INFO output = { MFMediaType_Video, MFVideoFormat_H264 };
@@ -134,6 +360,8 @@ namespace
                 SafeRelease(software[index]);
         }
         CoTaskMemFree(software);
+
+        hasQualifyingHardwareEncoder = d3d11AwareCount > 0;
 
         char summary[320] = {};
         sprintf_s(summary,
@@ -276,7 +504,10 @@ namespace
         return SUCCEEDED(result) || session->Fail(failedOperation, result);
     }
 
-    bool ConfigureInput(EncoderSession* session, bool probeDx11EncoderOnNegotiationFailure)
+    bool ConfigureInput(
+        EncoderSession* session,
+        bool probeDx11EncoderOnNegotiationFailure,
+        ID3D11Texture2D* dx11Texture)
     {
         IMFMediaType* inputType = nullptr;
         IMFAttributes* allocatorAttributes = nullptr;
@@ -326,7 +557,12 @@ namespace
             return true;
         session->Fail(failedOperation, result);
         if (probeDx11EncoderOnNegotiationFailure && result == E_NOTIMPL)
-            session->lastError += ProbeDx11H264Encoders();
+        {
+            bool hasQualifyingHardwareEncoder = false;
+            session->lastError += ProbeDx11H264Encoders(hasQualifyingHardwareEncoder);
+            if (!hasQualifyingHardwareEncoder)
+                session->lastError += ProbeDxvkVulkanVideo(dx11Texture);
+        }
         return false;
     }
 
@@ -794,7 +1030,7 @@ static EncoderSession* CreateEncoderSession(
 
     if (!ConfigureOutput(session, std::max(128000, bitrate)))
         return session;
-    if (!ConfigureInput(session, probeDx11EncoderOnNegotiationFailure))
+    if (!ConfigureInput(session, probeDx11EncoderOnNegotiationFailure, gpuTexture))
         return session;
 
     result = session->writer->BeginWriting();
