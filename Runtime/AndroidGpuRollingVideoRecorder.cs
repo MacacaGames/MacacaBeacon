@@ -23,6 +23,8 @@ namespace MacacaGames.RuntimeBugReporter
         private double incidentEnd;
         private Action<VideoCaptureResult> incidentCompleted;
         private int frameCount;
+        private int width;
+        private int height;
 
         public bool IsFinalizing { get; private set; }
         public bool IsEncoding => IsFinalizing;
@@ -85,6 +87,8 @@ namespace MacacaGames.RuntimeBugReporter
 
                 if (session == 0)
                 {
+                    width = frame.Width;
+                    height = frame.Height;
                     var directory = Path.Combine(Application.temporaryCachePath, "MacacaBeacon", "AndroidGpu");
                     Directory.CreateDirectory(directory);
                     outputPath = Path.Combine(directory, "incident-" + Guid.NewGuid().ToString("N") + ".mp4");
@@ -130,7 +134,7 @@ namespace MacacaGames.RuntimeBugReporter
             var result = finished && File.Exists(currentPath)
                 ? new VideoCaptureResult(currentPath, ".mp4", "video/mp4",
                     Math.Max(1d / Math.Max(1, settings.videoFramesPerSecond), Time.realtimeSinceStartupAsDouble - startedAt),
-                    frameCount, "Android MediaCodec GPU " + SystemInfo.graphicsDeviceType)
+                    frameCount, "Android MediaCodec GPU " + SystemInfo.graphicsDeviceType, width, height)
                 : null;
             IsFinalizing = false;
             incidentCompleted?.Invoke(result);

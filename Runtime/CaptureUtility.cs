@@ -143,7 +143,10 @@ namespace MacacaGames.RuntimeBugReporter
             }
         }
 
-        public static IEnumerator CaptureScaledJpegAsync(int targetWidth, int quality, Action<byte[]> completed)
+        public static IEnumerator CaptureScaledJpegAsync(
+            int targetWidth,
+            int quality,
+            Action<byte[]> completed)
         {
             yield return new WaitForEndOfFrame();
 
@@ -158,18 +161,20 @@ namespace MacacaGames.RuntimeBugReporter
                 yield break;
             }
 
-            var width = Mathf.Max(2, Mathf.Min(targetWidth, Screen.width));
-            var height = Mathf.Max(2, Mathf.RoundToInt(Screen.height * (width / (float)Mathf.Max(1, Screen.width))));
-            width -= width % 2;
-            height -= height % 2;
+            CalculateScaledSize(targetWidth, Screen.width, Screen.height, out var width, out var height);
 
             var renderTexture = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32);
+            RenderTexture sourceTexture = null;
             var request = default(AsyncGPUReadbackRequest);
             Texture2D scaled = null;
             byte[] bytes = null;
             try
             {
-                ScreenCapture.CaptureScreenshotIntoRenderTexture(renderTexture);
+                CaptureIntoRenderTexture(
+                    renderTexture,
+                    Screen.width,
+                    Screen.height,
+                    out sourceTexture);
                 request = AsyncGPUReadback.Request(renderTexture, 0, TextureFormat.RGBA32);
                 while (!request.done)
                     yield return null;
@@ -190,6 +195,8 @@ namespace MacacaGames.RuntimeBugReporter
             {
                 if (scaled != null)
                     UnityEngine.Object.Destroy(scaled);
+                if (sourceTexture != null)
+                    RenderTexture.ReleaseTemporary(sourceTexture);
                 RenderTexture.ReleaseTemporary(renderTexture);
             }
 
@@ -198,7 +205,9 @@ namespace MacacaGames.RuntimeBugReporter
             completed?.Invoke(bytes);
         }
 
-        public static IEnumerator CaptureScaledRgbaAsync(int targetWidth, Action<byte[], int, int> completed)
+        public static IEnumerator CaptureScaledRgbaAsync(
+            int targetWidth,
+            Action<byte[], int, int> completed)
         {
             yield return new WaitForEndOfFrame();
 
@@ -225,12 +234,10 @@ namespace MacacaGames.RuntimeBugReporter
 #endif
             var sourceWidth = editorSource == null ? Screen.width : editorSource.width;
             var sourceHeight = editorSource == null ? Screen.height : editorSource.height;
-            var width = Mathf.Max(2, Mathf.Min(targetWidth, sourceWidth));
-            var height = Mathf.Max(2, Mathf.RoundToInt(sourceHeight * (width / (float)Mathf.Max(1, sourceWidth))));
-            width -= width % 2;
-            height -= height % 2;
+            CalculateScaledSize(targetWidth, sourceWidth, sourceHeight, out var width, out var height);
 
             var renderTexture = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32);
+            RenderTexture sourceTexture = null;
             var request = default(AsyncGPUReadbackRequest);
             byte[] frame = null;
             try
@@ -243,7 +250,11 @@ namespace MacacaGames.RuntimeBugReporter
                 }
                 Graphics.Blit(editorSource, renderTexture);
 #else
-                ScreenCapture.CaptureScreenshotIntoRenderTexture(renderTexture);
+                CaptureIntoRenderTexture(
+                    renderTexture,
+                    sourceWidth,
+                    sourceHeight,
+                    out sourceTexture);
 #endif
                 request = AsyncGPUReadback.Request(renderTexture, 0, TextureFormat.RGBA32);
                 while (!request.done)
@@ -274,10 +285,47 @@ namespace MacacaGames.RuntimeBugReporter
             {
                 if (editorSource != null)
                     UnityEngine.Object.Destroy(editorSource);
+                if (sourceTexture != null)
+                    RenderTexture.ReleaseTemporary(sourceTexture);
                 RenderTexture.ReleaseTemporary(renderTexture);
             }
 
             completed?.Invoke(frame, frame == null ? 0 : width, frame == null ? 0 : height);
+        }
+
+        internal static void CalculateScaledSize(
+            int targetWidth,
+            int sourceWidth,
+            int sourceHeight,
+            out int width,
+            out int height)
+        {
+            width = Mathf.Max(2, Mathf.Min(targetWidth, sourceWidth));
+            height = Mathf.Max(2, Mathf.RoundToInt(sourceHeight * (width / (float)Mathf.Max(1, sourceWidth))));
+            width -= width % 2;
+            height -= height % 2;
+        }
+
+        private static void CaptureIntoRenderTexture(
+            RenderTexture target,
+            int sourceWidth,
+            int sourceHeight,
+            out RenderTexture source)
+        {
+            source = null;
+            if (target.width == sourceWidth && target.height == sourceHeight)
+            {
+                ScreenCapture.CaptureScreenshotIntoRenderTexture(target);
+                return;
+            }
+
+            source = RenderTexture.GetTemporary(
+                Mathf.Max(2, sourceWidth),
+                Mathf.Max(2, sourceHeight),
+                0,
+                RenderTextureFormat.ARGB32);
+            ScreenCapture.CaptureScreenshotIntoRenderTexture(source);
+            Graphics.Blit(source, target);
         }
 
         private static void EnsureReadbackBuffers(int byteCount, int rowLength)

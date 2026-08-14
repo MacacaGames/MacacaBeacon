@@ -1,14 +1,26 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 
 namespace MacacaGames.RuntimeBugReporter
 {
+    internal enum WindowsVideoBackendMode
+    {
+        Auto,
+        WindowsGpu,
+        WindowsCpu,
+        ManagedAvi
+    }
+
     internal sealed class RollingVideoRecorder
     {
+        private const string VideoBackendArgument = "-macaca-beacon-video-backend";
+        private const int DiagnosticCapacity = 32;
         // The Metal texture-submit path is still experimental. Keep it opt-in
         // until it has been validated against the Editor's native plugin
         // lifetime and graphics-device reset paths; the existing CPU/native
@@ -18,7 +30,9 @@ namespace MacacaGames.RuntimeBugReporter
         private const bool EnableExperimentalWindowsGpuPath = true;
         private readonly MonoBehaviour host;
         private readonly BugReporterSettings settings;
+        private readonly WindowsVideoBackendMode windowsVideoBackendMode;
         private readonly Queue<VideoCaptureFrame> history = new Queue<VideoCaptureFrame>();
+        private readonly Queue<string> diagnosticEntries = new Queue<string>();
         private List<VideoCaptureFrame> incidentFrames;
         private Action<VideoCaptureResult> incidentCompleted;
         private double captureStartedTime;
@@ -32,9 +46,11 @@ namespace MacacaGames.RuntimeBugReporter
         private bool isEncoding;
         private string frameCacheDirectory;
         private long historyBytes;
+        private bool backendEnvironmentLogged;
+        private VideoCaptureResult lastDiagnosticCapture;
         private readonly MacOsGpuRollingVideoRecorder gpuRecorder;
         private readonly AndroidGpuRollingVideoRecorder androidGpuRecorder;
-        private readonly WindowsGpuRollingVideoRecorder windowsGpuRecorder;
+        private WindowsGpuRollingVideoRecorder windowsGpuRecorder;
 
         public bool IsFinalizing => gpuRecorder != null ? gpuRecorder.IsFinalizing : androidGpuRecorder != null ? androidGpuRecorder.IsFinalizing : windowsGpuRecorder != null ? windowsGpuRecorder.IsFinalizing : isFinalizing;
         public bool IsEncoding => gpuRecorder != null ? gpuRecorder.IsEncoding : androidGpuRecorder != null ? androidGpuRecorder.IsEncoding : windowsGpuRecorder != null ? windowsGpuRecorder.IsEncoding : isEncoding;
@@ -44,6 +60,14 @@ namespace MacacaGames.RuntimeBugReporter
         {
             this.host = host;
             this.settings = settings;
+            var requestedBackend = ParseWindowsVideoBackend(Environment.GetCommandLineArgs(), out var invalidBackend);
+            if (!string.IsNullOrEmpty(invalidBackend))
+                RecordDiagnostic("Unknown video backend '" + invalidBackend + "'; using auto.", LogType.Warning);
+#if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
+            windowsVideoBackendMode = requestedBackend;
+#else
+            windowsVideoBackendMode = WindowsVideoBackendMode.Auto;
+#endif
 #if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
             if (EnableExperimentalMacOsGpuPath && MacOsGpuVideoBridge.IsAvailable)
                 gpuRecorder = new MacOsGpuRollingVideoRecorder(host, settings);
@@ -53,33 +77,101 @@ namespace MacacaGames.RuntimeBugReporter
                 androidGpuRecorder = new AndroidGpuRollingVideoRecorder(host, settings);
 #endif
 #if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
-            if (EnableExperimentalWindowsGpuPath && WindowsGpuVideoBridge.IsAvailable)
-                windowsGpuRecorder = new WindowsGpuRollingVideoRecorder(host, settings);
+            if (EnableExperimentalWindowsGpuPath &&
+                windowsVideoBackendMode != WindowsVideoBackendMode.WindowsCpu &&
+                windowsVideoBackendMode != WindowsVideoBackendMode.ManagedAvi &&
+                (windowsVideoBackendMode == WindowsVideoBackendMode.WindowsGpu || WindowsGpuVideoBridge.IsAvailable))
+                windowsGpuRecorder = new WindowsGpuRollingVideoRecorder(host, settings, RecoverFromWindowsGpuFailure);
 #endif
+        }
+
+        internal static WindowsVideoBackendMode ParseWindowsVideoBackend(string[] arguments, out string invalidValue)
+        {
+            invalidValue = null;
+            if (arguments == null)
+                return WindowsVideoBackendMode.Auto;
+
+            for (var index = 0; index < arguments.Length; index++)
+            {
+                var argument = arguments[index];
+                if (string.IsNullOrEmpty(argument))
+                    continue;
+                string value = null;
+                if (argument.StartsWith(VideoBackendArgument + "=", StringComparison.OrdinalIgnoreCase))
+                    value = argument.Substring(VideoBackendArgument.Length + 1);
+                else if (string.Equals(argument, VideoBackendArgument, StringComparison.OrdinalIgnoreCase) &&
+                         index + 1 < arguments.Length)
+                    value = arguments[index + 1];
+                else
+                    continue;
+
+                switch (value?.Trim().ToLowerInvariant())
+                {
+                    case "auto": return WindowsVideoBackendMode.Auto;
+                    case "windows-gpu": return WindowsVideoBackendMode.WindowsGpu;
+                    case "windows-cpu": return WindowsVideoBackendMode.WindowsCpu;
+                    case "managed-avi": return WindowsVideoBackendMode.ManagedAvi;
+                    default:
+                        invalidValue = value ?? string.Empty;
+                        return WindowsVideoBackendMode.Auto;
+                }
+            }
+            return WindowsVideoBackendMode.Auto;
+        }
+
+        internal static void GetEncoderPolicy(
+            WindowsVideoBackendMode mode,
+            bool configuredPreferMp4,
+            bool configuredAllowAvi,
+            out bool preferMp4,
+            out bool allowAvi,
+            out bool allowCustomEncoder)
+        {
+            preferMp4 = mode == WindowsVideoBackendMode.WindowsCpu ||
+                        (mode != WindowsVideoBackendMode.ManagedAvi && configuredPreferMp4);
+            allowAvi = mode == WindowsVideoBackendMode.ManagedAvi ||
+                       (mode != WindowsVideoBackendMode.WindowsCpu && configuredAllowAvi);
+            allowCustomEncoder = mode == WindowsVideoBackendMode.Auto;
+        }
+
+        private static string BackendModeName(WindowsVideoBackendMode mode)
+        {
+            switch (mode)
+            {
+                case WindowsVideoBackendMode.WindowsGpu: return "windows-gpu";
+                case WindowsVideoBackendMode.WindowsCpu: return "windows-cpu";
+                case WindowsVideoBackendMode.ManagedAvi: return "managed-avi";
+                default: return "auto";
+            }
         }
 
         public void Start()
         {
-            if (gpuRecorder != null)
-            {
-                gpuRecorder.Start();
-                return;
-            }
-            if (androidGpuRecorder != null)
-            {
-                androidGpuRecorder.Start();
-                return;
-            }
-            if (windowsGpuRecorder != null)
-            {
-                windowsGpuRecorder.Start();
-                return;
-            }
             SetEnabled(settings.enableRollingVideo);
         }
 
         public void SetEnabled(bool enabled)
         {
+            requestedEnabled = enabled;
+#if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
+            if (enabled && !backendEnvironmentLogged)
+            {
+                backendEnvironmentLogged = true;
+                var selected = windowsGpuRecorder != null
+                    ? "windows-gpu"
+                    : windowsVideoBackendMode == WindowsVideoBackendMode.WindowsCpu
+                        ? "windows-cpu"
+                        : windowsVideoBackendMode == WindowsVideoBackendMode.ManagedAvi
+                            ? "managed-avi"
+                            : "generic-auto";
+                RecordDiagnostic("Video backend mode=" + BackendModeName(windowsVideoBackendMode) +
+                                 ", selected=" + selected +
+                                 ", renderer=" + SystemInfo.graphicsDeviceType +
+                                 ", device=" + SystemInfo.graphicsDeviceName +
+                                 ", os=" + SystemInfo.operatingSystem +
+                                 ", unity=" + Application.unityVersion + ".");
+            }
+#endif
             if (gpuRecorder != null)
             {
                 gpuRecorder.SetEnabled(enabled);
@@ -95,36 +187,71 @@ namespace MacacaGames.RuntimeBugReporter
                 windowsGpuRecorder.SetEnabled(enabled);
                 return;
             }
-            requestedEnabled = enabled;
             if (enabled)
-            {
-                if (captureCoroutine == null)
-                {
-                    captureStartedTime = Time.realtimeSinceStartupAsDouble;
-                    captureCoroutine = host.StartCoroutine(CaptureLoop());
-                }
-            }
+                StartGenericCapture();
             else if (!IsFinalizing)
             {
                 StopCapture();
             }
         }
 
+        private void StartGenericCapture()
+        {
+            if (captureCoroutine != null)
+                return;
+            captureStartedTime = Time.realtimeSinceStartupAsDouble;
+            captureCoroutine = host.StartCoroutine(CaptureLoop());
+        }
+
+        private void RecoverFromWindowsGpuFailure(string error, Action<VideoCaptureResult> pendingIncident)
+        {
+            windowsGpuRecorder = null;
+            if (windowsVideoBackendMode == WindowsVideoBackendMode.WindowsGpu)
+            {
+                requestedEnabled = false;
+                RecordDiagnostic("Forced Windows GPU video failed on " + SystemInfo.graphicsDeviceType +
+                                 ": " + (error ?? "unknown error") + ". Generic fallback is disabled for this diagnostic run.", LogType.Warning);
+                pendingIncident?.Invoke(null);
+                return;
+            }
+            RecordDiagnostic("Windows GPU video failed on " + SystemInfo.graphicsDeviceType +
+                             ": " + (error ?? "unknown error") +
+                             ". Switching to the generic MP4/AVI compatibility recorder with a fresh history.", LogType.Warning);
+            if (!requestedEnabled)
+            {
+                pendingIncident?.Invoke(null);
+                return;
+            }
+
+            StartGenericCapture();
+            if (pendingIncident != null)
+                MarkIncident(pendingIncident);
+        }
+
         public void MarkIncident(Action<VideoCaptureResult> completed)
         {
+            var diagnosticCompleted = completed;
+            if (IsEnabled)
+            {
+                diagnosticCompleted = result =>
+                {
+                    RecordCaptureResult(result);
+                    completed?.Invoke(result);
+                };
+            }
             if (gpuRecorder != null)
             {
-                gpuRecorder.MarkIncident(completed);
+                gpuRecorder.MarkIncident(diagnosticCompleted);
                 return;
             }
             if (androidGpuRecorder != null)
             {
-                androidGpuRecorder.MarkIncident(completed);
+                androidGpuRecorder.MarkIncident(diagnosticCompleted);
                 return;
             }
             if (windowsGpuRecorder != null)
             {
-                windowsGpuRecorder.MarkIncident(completed);
+                windowsGpuRecorder.MarkIncident(diagnosticCompleted);
                 return;
             }
             if (!requestedEnabled)
@@ -135,7 +262,7 @@ namespace MacacaGames.RuntimeBugReporter
 
             var incidentTime = Time.realtimeSinceStartupAsDouble;
             incidentFrames = new List<VideoCaptureFrame>(history);
-            incidentCompleted = completed;
+            incidentCompleted = diagnosticCompleted;
             incidentClipStartTime = Math.Max(captureStartedTime, incidentTime - settings.secondsBefore);
             incidentEndTime = incidentTime + settings.secondsAfter;
             var availableSeconds = history.Count == 0
@@ -197,7 +324,10 @@ namespace MacacaGames.RuntimeBugReporter
                 if (frame == null)
                 {
                     frameFormat = VideoCaptureFrameFormat.Jpeg;
-                    yield return CaptureUtility.CaptureScaledJpegAsync(settings.videoWidth, settings.videoJpegQuality, value => frame = value);
+                    yield return CaptureUtility.CaptureScaledJpegAsync(
+                        settings.videoWidth,
+                        settings.videoJpegQuality,
+                        value => frame = value);
                     frameWidth = Mathf.Max(2, Mathf.Min(settings.videoWidth, Screen.width));
                     frameWidth -= frameWidth % 2;
                     frameHeight = Mathf.RoundToInt(Screen.height * (frameWidth / (float)Mathf.Max(1, Screen.width)));
@@ -303,8 +433,15 @@ namespace MacacaGames.RuntimeBugReporter
             var outputStem = Path.Combine(captureDirectory, "incident-" + Guid.NewGuid().ToString("N"));
             string encoderError = null;
             VideoCaptureResult result = null;
+            GetEncoderPolicy(
+                windowsVideoBackendMode,
+                settings.preferMp4,
+                settings.allowLegacyAviFallback,
+                out var preferMp4,
+                out var allowLegacyAviFallback,
+                out var allowCustomEncoder);
 #if UNITY_WEBGL && !UNITY_EDITOR
-            if (settings.preferMp4)
+            if (preferMp4)
             {
                 yield return WebGlWebCodecsMp4Encoder.TryEncodeAsync(
                     outputStem + WebGlWebCodecsMp4Encoder.Extension,
@@ -320,7 +457,7 @@ namespace MacacaGames.RuntimeBugReporter
                         encoderError = error;
                     });
 
-                if (result == null && settings.allowLegacyAviFallback)
+                if (result == null && allowLegacyAviFallback)
                 {
                     result = VideoEncoderBackend.Encode(
                         outputStem,
@@ -330,6 +467,7 @@ namespace MacacaGames.RuntimeBugReporter
                         settings.videoFramesPerSecond,
                         settings.videoBitrateKbps,
                         durationSeconds,
+                        settings.videoJpegQuality,
                         false,
                         true,
                         out encoderError);
@@ -345,12 +483,13 @@ namespace MacacaGames.RuntimeBugReporter
                     settings.videoFramesPerSecond,
                     settings.videoBitrateKbps,
                     durationSeconds,
-                    settings.preferMp4,
-                    settings.allowLegacyAviFallback,
+                    settings.videoJpegQuality,
+                    preferMp4,
+                    allowLegacyAviFallback,
                     out encoderError);
             }
 #elif UNITY_ANDROID && !UNITY_EDITOR
-            if (settings.preferMp4 && BugReporter.VideoEncoderOverride == null && AreRawFileFrames(frames))
+            if (preferMp4 && allowCustomEncoder && BugReporter.VideoEncoderOverride == null && AreRawFileFrames(frames))
             {
                 var androidEncoder = new AndroidMediaCodecMp4Encoder();
                 yield return androidEncoder.TryEncodeRawFilesAsync(
@@ -379,9 +518,11 @@ namespace MacacaGames.RuntimeBugReporter
                     settings.videoFramesPerSecond,
                     settings.videoBitrateKbps,
                     durationSeconds,
-                    settings.preferMp4,
-                    settings.allowLegacyAviFallback,
-                    out encoderError);
+                    settings.videoJpegQuality,
+                    preferMp4,
+                    allowLegacyAviFallback,
+                    out encoderError,
+                    allowCustomEncoder);
             }
 #else
             var task = Task.Run(() => VideoEncoderBackend.Encode(
@@ -392,9 +533,11 @@ namespace MacacaGames.RuntimeBugReporter
                 settings.videoFramesPerSecond,
                 settings.videoBitrateKbps,
                 durationSeconds,
-                settings.preferMp4,
-                settings.allowLegacyAviFallback,
-                out encoderError));
+                settings.videoJpegQuality,
+                preferMp4,
+                allowLegacyAviFallback,
+                out encoderError,
+                allowCustomEncoder));
 
             while (!task.IsCompleted)
                 yield return null;
@@ -402,6 +545,7 @@ namespace MacacaGames.RuntimeBugReporter
             if (task.IsFaulted)
             {
                 Debug.LogException(task.Exception);
+                encoderError = task.Exception?.GetBaseException().Message;
             }
             else
             {
@@ -418,11 +562,14 @@ namespace MacacaGames.RuntimeBugReporter
             isEncoding = false;
             if (result == null)
             {
-                Debug.LogWarning("[Macaca Beacon] Video finalization failed: " + (encoderError ?? "unknown encoder error"));
+                RecordDiagnostic("Video finalization failed: " + (encoderError ?? "unknown encoder error"), LogType.Warning);
             }
             else
             {
-                Debug.Log("[Macaca Beacon] Video finalized by " + result.EncoderName + ": " + result.FrameCount + " frames over " + result.DurationSeconds.ToString("0.00") + " seconds at " + result.FilePath);
+                if (string.Equals(result.Extension, ".avi", StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrEmpty(encoderError))
+                    RecordDiagnostic("Preferred MP4 encoder failed before managed AVI fallback succeeded: " + encoderError, LogType.Warning);
+                RecordCaptureResult(result);
             }
             completed?.Invoke(result);
             DeleteFrameCache();
@@ -431,6 +578,52 @@ namespace MacacaGames.RuntimeBugReporter
             captureStartedTime = Time.realtimeSinceStartupAsDouble;
             if (!requestedEnabled)
                 StopCapture();
+        }
+
+        internal void RecordCaptureResult(VideoCaptureResult result)
+        {
+            if (result == null || ReferenceEquals(result, lastDiagnosticCapture))
+                return;
+            lastDiagnosticCapture = result;
+            var dimensions = result.Width > 0 && result.Height > 0
+                ? ", output=" + result.Width + "x" + result.Height
+                : string.Empty;
+            var effectiveFramesPerSecond = result.DurationSeconds > 0d
+                ? result.FrameCount / result.DurationSeconds
+                : 0d;
+            RecordDiagnostic("Video finalized by " + result.EncoderName +
+                             ": frames=" + result.FrameCount +
+                             ", duration=" + result.DurationSeconds.ToString("0.00", CultureInfo.InvariantCulture) + "s" +
+                             ", effectiveFps=" + effectiveFramesPerSecond.ToString("0.00", CultureInfo.InvariantCulture) +
+                             dimensions +
+                             ", file=" + result.FilePath + ".");
+        }
+
+        internal string BuildDiagnostics()
+        {
+            lock (diagnosticEntries)
+            {
+                var builder = new StringBuilder();
+                foreach (var entry in diagnosticEntries)
+                    builder.AppendLine(entry);
+                return builder.ToString();
+            }
+        }
+
+        private void RecordDiagnostic(string message, LogType type = LogType.Log)
+        {
+            var fullMessage = "[Macaca Beacon] " + message;
+            var entry = "[" + DateTime.UtcNow.ToString("O") + "] [" + type + "] " + fullMessage;
+            lock (diagnosticEntries)
+            {
+                diagnosticEntries.Enqueue(entry);
+                while (diagnosticEntries.Count > DiagnosticCapacity)
+                    diagnosticEntries.Dequeue();
+            }
+            if (type == LogType.Warning)
+                Debug.LogWarning(fullMessage);
+            else
+                Debug.Log(fullMessage);
         }
 
         private void DeleteFrameCache()

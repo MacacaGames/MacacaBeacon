@@ -1,0 +1,25 @@
+{
+  "name": "MacacaGames.RuntimeBugReporter.InputSystem",
+  "rootNamespace": "MacacaGames.RuntimeBugReporter",
+  "references": [
+    "MacacaGames.RuntimeBugReporter",
+    "Unity.InputSystem"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [
+    "MACACA_BEACON_INPUT_SYSTEM"
+  ],
+  "versionDefines": [
+    {
+      "name": "com.unity.inputsystem",
+      "expression": "1.0.0",
+      "define": "MACACA_BEACON_INPUT_SYSTEM"
+    }
+  ],
+  "noEngineReferences": false
+}

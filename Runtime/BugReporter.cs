@@ -9,6 +9,8 @@ namespace MacacaGames.RuntimeBugReporter
         private static readonly List<IBugReportDataProvider> Providers = new List<IBugReportDataProvider>();
         internal static IBugReportTransport TransportOverride;
         internal static IVideoEncoderBackend VideoEncoderOverride;
+        internal static bool SoftwareCursorEnabled { get; private set; } = true;
+        internal static bool HandheldModeEnabled { get; private set; }
 
         public static bool IsOpen => BugReporterController.Instance != null && BugReporterController.Instance.IsOpen;
 
@@ -24,7 +26,8 @@ namespace MacacaGames.RuntimeBugReporter
 #else
                 if (BugReporterController.Instance != null)
                     return BugReporterController.Instance.IsVideoRecordingEnabled;
-                return BugReporterSettings.LoadOrDefault().enableRollingVideo;
+                var settings = BugReporterSettings.LoadOrDefault();
+                return IsEnabled(settings) && settings.enableRollingVideo;
 #endif
             }
         }
@@ -34,8 +37,8 @@ namespace MacacaGames.RuntimeBugReporter
 #if MACACA_BEACON_PRODUCTION || PRODUCTION
             return;
 #else
-            EnsureController();
-            BugReporterController.Instance.RequestOpen();
+            if (EnsureController())
+                BugReporterController.Instance.RequestOpen();
 #endif
         }
 
@@ -54,9 +57,30 @@ namespace MacacaGames.RuntimeBugReporter
 #if MACACA_BEACON_PRODUCTION || PRODUCTION
             return;
 #else
-            EnsureController();
-            BugReporterController.Instance.SetVideoRecordingEnabled(enabled);
+            if (EnsureController())
+                BugReporterController.Instance.SetVideoRecordingEnabled(enabled);
 #endif
+        }
+
+        /// <summary>
+        /// Enables or disables BugReporter's desktop software cursor for this
+        /// runtime session. This does not create the reporter or change Unity's
+        /// cursor state. Handheld and console device classes remain excluded.
+        /// </summary>
+        public static void SetSoftwareCursorEnabled(bool enabled)
+        {
+            SoftwareCursorEnabled = enabled;
+        }
+
+        /// <summary>
+        /// Selects the touch-oriented entry presentation and disables the
+        /// desktop software cursor for a host-identified PC handheld. This
+        /// session-only override does not create the reporter or require a
+        /// platform SDK.
+        /// </summary>
+        public static void SetHandheldMode(bool enabled)
+        {
+            HandheldModeEnabled = enabled;
         }
 
         public static void RegisterDataProvider(IBugReportDataProvider provider)
@@ -91,21 +115,40 @@ namespace MacacaGames.RuntimeBugReporter
             return;
 #else
             var settings = BugReporterSettings.LoadOrDefault();
-            if (settings.enabledInBuild)
+            if (IsEnabled(settings))
                 EnsureController(settings);
 #endif
         }
 
-        private static void EnsureController(BugReporterSettings settings = null)
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+        private static void ResetSessionState()
+        {
+            SoftwareCursorEnabled = true;
+            HandheldModeEnabled = false;
+        }
+
+        internal static bool IsEnabled(BugReporterSettings settings)
+        {
+            return settings != null && ShouldEnable(Application.isEditor, settings.enableInBuild);
+        }
+
+        internal static bool ShouldEnable(bool isEditor, bool enableInBuild) => isEditor || enableInBuild;
+
+        private static bool EnsureController(BugReporterSettings settings = null)
         {
             if (BugReporterController.Instance != null)
-                return;
+                return true;
+
+            settings = settings ?? BugReporterSettings.LoadOrDefault();
+            if (!IsEnabled(settings))
+                return false;
 
             var host = new GameObject("[Macaca Beacon]");
             host.hideFlags = HideFlags.HideInHierarchy;
             UnityEngine.Object.DontDestroyOnLoad(host);
             var controller = host.AddComponent<BugReporterController>();
-            controller.Initialize(settings ?? BugReporterSettings.LoadOrDefault());
+            controller.Initialize(settings);
+            return true;
         }
     }
 }

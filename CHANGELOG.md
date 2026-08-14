@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+- Changed activation back to build-specific semantics: Editor Play Mode stays enabled, while `Enable In Build` consistently gates automatic and API-driven Player activation.
+- Added an IMGUI software cursor with resolution-consistent apparent size and movement for hidden or locked desktop pointers without changing Unity cursor state, using an optional Input System raw-delta adapter, automatic mobile/handheld/console exclusions, and a Steamworks-independent runtime opt-out for PC handhelds.
+- Added a host-provided Handheld Mode that reuses the touch-oriented Entry Button without its keyboard label and excludes the desktop software cursor, while keeping Steamworks outside the package.
+- Added IMGUI Screenshot and Video review tabs with API-only `VideoPlayer` playback, click/tap play-pause, and a draggable in-frame timeline for finalized H.264 MP4 incident files.
+- Added per-report Screenshot and Video inclusion toggles together in the right-side Attachments section, while keeping the left review tabs focused on media preview.
+- Placed the two media choices on one row, using selected color instead of ON/OFF text, and removed selection-like hover feedback from non-interactive report text.
+- Fixed software-cursor dragging for the left, right, and compact report-page scrollbars.
+- Fixed screenshot review clipping and unwanted horizontal scrolling by wrapping annotation controls from the capture column's actual width.
+- Removed the redundant Play and Restart row after moving playback and seeking into the video frame.
+- Kept valid recordings attachable when local preview is unavailable, including AVI fallback and decoder failures.
+- Fixed Linux and native Steam Deck incident finalization by converting generic disk-backed RGBA frames for the existing managed MJPEG AVI fallback.
+- Fixed Windows GPU rolling-video recovery by rejecting native sessions with initialization errors and switching create, submit, segment-finalize, or merge failures to the existing generic MP4/AVI recorder without adding Steamworks or device detection.
+- Added opt-in Windows video backend diagnostics for Steam Launch Options, with isolated GPU, CPU Media Foundation, and managed AVI paths plus operation-specific native HRESULT errors; the default Windows GPU path and capture settings are unchanged.
+- Preserved a bounded video backend/fallback timeline in diagnostics independently from recent gameplay logs, including screen/output dimensions, frame count, duration, and effective FPS.
+- Enabled non-WebGL report pages to attempt managed MJPEG AVI preview through the existing Unity `VideoPlayer`, while keeping valid files attachable when the platform decoder rejects them.
+- Documented that `Video Width` intentionally scales output resolution while preserving aspect ratio instead of changing native screen resolution or capture performance policy.
+- Fixed generic fallback capture on Proton/D3D by explicitly scaling the complete backbuffer before readback, without changing preferred macOS or Windows GPU recording.
+- Added a bounded managed fallback for MacacaBeacon-authored MJPEG AVI when `VideoPlayer` errors or returns implausible duration, frame, or aspect metadata; working native Windows AVI, MP4, and other AVI encoders keep the existing `VideoPlayer` path.
+
 ## 0.5.1
 
 - Added compile-time Production isolation with the `MACACA_BEACON_PRODUCTION` define.

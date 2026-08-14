@@ -166,7 +166,7 @@ namespace MacacaGames.RuntimeBugReporter
                 }
 
                 completed?.Invoke(
-                    new VideoCaptureResult(outputPath, Extension, MimeType, durationSeconds, frames.Count, Name + " background job"),
+                    new VideoCaptureResult(outputPath, Extension, MimeType, durationSeconds, frames.Count, Name + " background job", width, height),
                     null);
             }
             finally

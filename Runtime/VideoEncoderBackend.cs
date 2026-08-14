@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using UnityEngine;
+using UnityEngine.Experimental.Rendering;
 
 namespace MacacaGames.RuntimeBugReporter
 {
@@ -15,6 +17,8 @@ namespace MacacaGames.RuntimeBugReporter
 
     internal static class VideoEncoderBackend
     {
+        internal const string ManagedAviEncoderName = "Managed MJPEG AVI fallback";
+
         public static VideoCaptureResult Encode(
             string outputStem,
             IReadOnlyList<VideoCaptureFrame> frames,
@@ -23,9 +27,11 @@ namespace MacacaGames.RuntimeBugReporter
             int framesPerSecond,
             int bitrateKbps,
             double durationSeconds,
+            int jpegQuality,
             bool preferMp4,
             bool allowLegacyAviFallback,
-            out string error)
+            out string error,
+            bool allowCustomEncoder = true)
         {
             error = null;
             if (frames == null || frames.Count == 0)
@@ -36,12 +42,12 @@ namespace MacacaGames.RuntimeBugReporter
 
             if (preferMp4)
             {
-                var custom = BugReporter.VideoEncoderOverride;
+                var custom = allowCustomEncoder ? BugReporter.VideoEncoderOverride : null;
                 if (custom != null && custom.IsAvailable)
                 {
                     var customOutputPath = outputStem + custom.Extension;
                     if (custom.TryEncode(customOutputPath, frames, width, height, framesPerSecond, bitrateKbps, durationSeconds, out error))
-                        return new VideoCaptureResult(customOutputPath, custom.Extension, custom.MimeType, durationSeconds, frames.Count, custom.Name);
+                        return new VideoCaptureResult(customOutputPath, custom.Extension, custom.MimeType, durationSeconds, frames.Count, custom.Name, width, height);
                     TryDelete(customOutputPath);
                 }
 
@@ -50,7 +56,7 @@ namespace MacacaGames.RuntimeBugReporter
                 {
                     var outputPath = outputStem + mp4.Extension;
                     if (mp4.TryEncode(outputPath, frames, width, height, framesPerSecond, bitrateKbps, durationSeconds, out error))
-                        return new VideoCaptureResult(outputPath, mp4.Extension, mp4.MimeType, durationSeconds, frames.Count, mp4.Name);
+                        return new VideoCaptureResult(outputPath, mp4.Extension, mp4.MimeType, durationSeconds, frames.Count, mp4.Name, width, height);
                     TryDelete(outputPath);
                 }
                 else
@@ -71,12 +77,36 @@ namespace MacacaGames.RuntimeBugReporter
                 var jpegFrames = new List<byte[]>(frames.Count);
                 for (var index = 0; index < frames.Count; index++)
                 {
-                    if (frames[index].Format != VideoCaptureFrameFormat.Jpeg)
+                    var frame = frames[index];
+                    if (!frame.HasData)
                     {
-                        error = "Legacy AVI fallback only supports JPEG capture frames.";
+                        error = "Legacy AVI fallback frame " + index + " had no data.";
                         return null;
                     }
-                    jpegFrames.Add(frames[index].ReadData());
+
+                    var data = frame.ReadData();
+                    if (frame.Format == VideoCaptureFrameFormat.Rgba32)
+                    {
+                        var expectedByteCount = (long)frame.Width * frame.Height * 4L;
+                        if (frame.Width <= 0 || frame.Height <= 0 || data == null || data.LongLength != expectedByteCount)
+                        {
+                            error = "Legacy AVI fallback frame " + index + " had invalid RGBA32 dimensions or data length.";
+                            return null;
+                        }
+                        data = ImageConversion.EncodeArrayToJPG(
+                            data,
+                            GraphicsFormat.R8G8B8A8_UNorm,
+                            (uint)frame.Width,
+                            (uint)frame.Height,
+                            0,
+                            Math.Max(1, Math.Min(100, jpegQuality)));
+                    }
+                    if (data == null || data.Length == 0)
+                    {
+                        error = "Legacy AVI fallback frame " + index + " could not be converted to JPEG.";
+                        return null;
+                    }
+                    jpegFrames.Add(data);
                 }
                 var bytes = MjpegAviEncoder.Encode(jpegFrames, width, height, framesPerSecond, (float)durationSeconds);
                 if (bytes == null || bytes.Length == 0)
@@ -87,7 +117,7 @@ namespace MacacaGames.RuntimeBugReporter
 
                 var outputPath = outputStem + ".avi";
                 File.WriteAllBytes(outputPath, bytes);
-                return new VideoCaptureResult(outputPath, ".avi", "video/x-msvideo", durationSeconds, frames.Count, "Managed MJPEG AVI fallback");
+                return new VideoCaptureResult(outputPath, ".avi", "video/x-msvideo", durationSeconds, frames.Count, ManagedAviEncoderName, width, height);
             }
             catch (Exception exception)
             {

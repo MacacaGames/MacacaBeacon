@@ -100,7 +100,7 @@ namespace MacacaGames.RuntimeBugReporter
                     yield break;
                 }
 
-                completed?.Invoke(new VideoCaptureResult(outputPath, Extension, MimeType, durationSeconds, frames.Count, Name), null);
+                completed?.Invoke(new VideoCaptureResult(outputPath, Extension, MimeType, durationSeconds, frames.Count, Name, width, height), null);
             }
             finally
             {

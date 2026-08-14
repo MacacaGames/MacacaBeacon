@@ -27,31 +27,91 @@ namespace MacacaGames.RuntimeBugReporter
             }
         }
 
-        public static IntPtr CreateSession(string outputPath, GpuFrameCapture.GpuFrame frame, int framesPerSecond, int bitrateKbps)
+        public static bool TryCreateSession(
+            string outputPath,
+            GpuFrameCapture.GpuFrame frame,
+            int framesPerSecond,
+            int bitrateKbps,
+            out IntPtr session,
+            out string error)
         {
+            session = IntPtr.Zero;
+            error = null;
 #if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
-            if (!IsAvailable || !frame.IsValid)
-                return IntPtr.Zero;
+            if (!frame.IsValid)
+            {
+                error = "The Windows GPU capture texture is unavailable.";
+                return false;
+            }
+            if (!IsAvailable)
+            {
+                error = GetAvailabilityError();
+                return false;
+            }
+
             try
             {
                 var bitrate = Math.Max(128, bitrateKbps) * 1000;
-                return SystemInfo.graphicsDeviceType == GraphicsDeviceType.Direct3D12
+                session = SystemInfo.graphicsDeviceType == GraphicsDeviceType.Direct3D12
                     ? NativeGpuCreateD3D12(outputPath, frame.Width, frame.Height, framesPerSecond, bitrate)
                     : NativeGpuCreate(outputPath, frame.Width, frame.Height, framesPerSecond,
                         bitrate, frame.NativeTexturePtr);
+                error = GetLastError(session);
+                if (IsCreatedSessionUsable(session, error))
+                    return true;
+
+                if (session != IntPtr.Zero)
+                {
+                    DestroySession(session);
+                    session = IntPtr.Zero;
+                }
+                error = string.IsNullOrEmpty(error)
+                    ? "The Windows native plugin did not create a GPU video session."
+                    : error;
+                return false;
             }
-            catch (DllNotFoundException) { return IntPtr.Zero; }
-            catch (EntryPointNotFoundException) { return IntPtr.Zero; }
-            catch (BadImageFormatException) { return IntPtr.Zero; }
+            catch (Exception exception) when (
+                exception is DllNotFoundException ||
+                exception is EntryPointNotFoundException ||
+                exception is BadImageFormatException)
+            {
+                session = IntPtr.Zero;
+                error = exception.Message;
+                return false;
+            }
 #else
-            return IntPtr.Zero;
+            error = "The Windows GPU video bridge is not compiled for this target.";
+            return false;
+#endif
+        }
+
+        internal static bool IsCreatedSessionUsable(IntPtr session, string error)
+        {
+            return session != IntPtr.Zero && string.IsNullOrEmpty(error);
+        }
+
+        private static string GetAvailabilityError()
+        {
+#if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
+            try
+            {
+                var pointer = NativeAvailabilityError();
+                if (pointer != IntPtr.Zero)
+                    return Marshal.PtrToStringAnsi(pointer) ?? "The Windows GPU video bridge is unavailable.";
+            }
+            catch (DllNotFoundException exception) { return exception.Message; }
+            catch (EntryPointNotFoundException exception) { return exception.Message; }
+            catch (BadImageFormatException exception) { return exception.Message; }
+            return "The Windows GPU video bridge is unavailable for renderer " + SystemInfo.graphicsDeviceType + ".";
+#else
+            return "The Windows GPU video bridge is not compiled for this target.";
 #endif
         }
 
         public static bool Submit(IntPtr session, GpuFrameCapture.GpuFrame frame, double presentationSeconds)
         {
 #if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
-            if (session == IntPtr.Zero || !frame.IsValid || !IsAvailable)
+            if (session == IntPtr.Zero || !frame.IsValid)
                 return false;
             try
             {
@@ -186,6 +246,9 @@ namespace MacacaGames.RuntimeBugReporter
         private static extern int NativeFinish(IntPtr session);
         [DllImport("MacacaBeaconVideoWindows", EntryPoint = "MacacaBeaconWindowsVideo_LastError", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr NativeLastError(IntPtr session);
+
+        [DllImport("MacacaBeaconVideoWindows", EntryPoint = "MacacaBeaconWindowsVideo_AvailabilityError", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr NativeAvailabilityError();
         [DllImport("MacacaBeaconVideoWindows", EntryPoint = "MacacaBeaconWindowsVideo_Destroy", CallingConvention = CallingConvention.Cdecl)]
         private static extern void NativeDestroy(IntPtr session);
         [DllImport("MacacaBeaconVideoWindows", EntryPoint = "MacacaBeaconWindowsVideo_ConcatSegments", CallingConvention = CallingConvention.Cdecl)]
@@ -209,7 +272,10 @@ namespace MacacaGames.RuntimeBugReporter
                 return IntPtr.Zero;
             var frame = new GpuFrameCapture.GpuFrame(
                 texture, texture.GetNativeTexturePtr(), texture.width, texture.height);
-            return WindowsGpuVideoBridge.CreateSession(outputPath, frame, framesPerSecond, bitrateKbps);
+            return WindowsGpuVideoBridge.TryCreateSession(
+                outputPath, frame, framesPerSecond, bitrateKbps, out var session, out _)
+                ? session
+                : IntPtr.Zero;
         }
 
         public static bool Submit(IntPtr session, RenderTexture texture, double presentationSeconds)

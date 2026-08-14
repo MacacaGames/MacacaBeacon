@@ -1,16 +1,41 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
 using System.Text;
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.Video;
 
 namespace MacacaGames.RuntimeBugReporter
 {
+    internal enum VideoReviewState
+    {
+        Preparing,
+        Ready,
+        Unavailable,
+        PreviewUnavailable
+    }
+
     internal sealed class BugReporterController : MonoBehaviour
     {
         private static readonly string[] AnnotationColorLabels = { "RED", "YELLOW", "CYAN" };
         private static readonly string[] AnnotationSizeLabels = { "S", "M", "L" };
+        private static readonly string[] CaptureTabLabels = { "SCREENSHOT", "VIDEO" };
+        private static readonly int VideoSeekControlHash = "MacacaBeaconVideoSeek".GetHashCode();
+        private static readonly int ScrollbarControlHash = "MacacaBeaconScrollbar".GetHashCode();
+        internal static Func<Vector2> SoftwareCursorDeltaReader;
+        internal static Func<SoftwareCursorButtonState> SoftwareCursorButtonReader;
+
+        [Flags]
+        internal enum SoftwareCursorButtonState
+        {
+            None = 0,
+            Pressed = 1,
+            Released = 2,
+            Held = 4
+        }
 
         internal static BugReporterController Instance { get; private set; }
         internal bool IsOpen { get; private set; }
@@ -21,6 +46,16 @@ namespace MacacaGames.RuntimeBugReporter
         private RollingVideoRecorder videoRecorder;
         private byte[] screenshotBytes;
         private VideoCaptureResult videoCapture;
+        private VideoPlayer videoPlayer;
+        private ManagedMjpegAviPreview managedAviPreview;
+        private string preparedVideoPath;
+        private string videoPreviewError;
+        private string videoPreviewDiagnosticError;
+        private int captureTabIndex;
+        private bool videoCaptureRequested;
+        private bool videoCaptureCompleted;
+        private bool includeScreenshotInReport;
+        private bool includeVideoInReport;
         private Texture2D screenshotPreview;
         private ScreenshotAnnotator screenshotAnnotator;
         private int annotationColorIndex;
@@ -41,8 +76,17 @@ namespace MacacaGames.RuntimeBugReporter
         private int touchScrollTarget;
         private Vector2 lastTouchScrollPosition;
         private Rect windowRect;
-        private CursorLockMode previousCursorLock;
-        private bool previousCursorVisible;
+        private Vector2 softwareCursorPosition;
+        private bool softwareCursorInitialized;
+        private int softwareCursorDeltaFrame = -1;
+        private SoftwareCursorButtonState softwareCursorButtonState;
+        private int softwareCursorButtonFrame = -1;
+        private int softwareCursorPressedControl;
+        private int softwareCursorScrollTarget;
+        private float softwareCursorScrollLastY;
+        private string softwareCursorFocusedTextControl;
+        private int softwareCursorFocusedTextControlId;
+        private double? softwareCursorVideoPreviewTime;
         private GUIStyle titleStyle;
         private GUIStyle subtitleStyle;
         private GUIStyle labelStyle;
@@ -56,14 +100,20 @@ namespace MacacaGames.RuntimeBugReporter
         private GUIStyle closeButtonStyle;
         private GUIStyle statusStyle;
         private GUIStyle validationStyle;
+        private GUIStyle previewMessageStyle;
+        private GUIStyle inclusionToggleStyle;
         private readonly List<Texture2D> styleTextures = new List<Texture2D>();
         private Texture2D windowTexture;
         private Texture2D accentTexture;
         private Texture2D fieldTexture;
+        private Texture2D softwareCursorTexture;
         private float styleScale = -1f;
-        private GUIStyle mobileEntryStyle;
+        private GUIStyle entryButtonStyle;
+        private GUIStyle entryShortcutStyle;
+#if UNITY_IOS || UNITY_ANDROID
         private float mobileGestureStartedAt = -1f;
         private bool mobileGestureTriggered;
+#endif
         private GameObject inputBlocker;
 
         // The two-column layout needs more room than its old 900 px cutoff
@@ -72,6 +122,9 @@ namespace MacacaGames.RuntimeBugReporter
         // stacked so the form never collapses into a clipped sliver.
         private const float DesktopLayoutMinimumWidth = 1120f;
         private const float MobileLayoutMaximumWidth = 720f;
+        private const float HorizontalAnnotationToolbarMinimumWidth = 620f;
+        // Locked mouse delta does not include the desktop cursor's acceleration.
+        private const float LockedSoftwareCursorSpeed = 4f;
 
         internal void Initialize(BugReporterSettings value)
         {
@@ -94,10 +147,22 @@ namespace MacacaGames.RuntimeBugReporter
                 return;
             IsOpen = false;
             SetInputBlocker(false);
+            ResetVideoPreview();
             videoCapture?.DeleteFile();
             videoCapture = null;
-            Cursor.lockState = previousCursorLock;
-            Cursor.visible = previousCursorVisible;
+            captureTabIndex = 0;
+            includeScreenshotInReport = false;
+            includeVideoInReport = false;
+            videoPreviewDiagnosticError = null;
+            softwareCursorInitialized = false;
+            softwareCursorDeltaFrame = -1;
+            softwareCursorButtonState = SoftwareCursorButtonState.None;
+            softwareCursorButtonFrame = -1;
+            softwareCursorPressedControl = 0;
+            softwareCursorScrollTarget = 0;
+            softwareCursorFocusedTextControl = null;
+            softwareCursorFocusedTextControlId = 0;
+            softwareCursorVideoPreviewTime = null;
             status = "";
         }
 
@@ -119,6 +184,15 @@ namespace MacacaGames.RuntimeBugReporter
         private void OnDestroy()
         {
             if (Instance == this) Instance = null;
+            ResetVideoPreview();
+            if (videoPlayer != null)
+            {
+                videoPlayer.prepareCompleted -= OnVideoPrepared;
+                videoPlayer.frameReady -= OnVideoFirstFrameReady;
+                videoPlayer.errorReceived -= OnVideoError;
+            }
+            videoCapture?.DeleteFile();
+            videoCapture = null;
             logs?.Dispose();
             videoRecorder?.Dispose();
             if (inputBlocker != null)
@@ -129,13 +203,19 @@ namespace MacacaGames.RuntimeBugReporter
 
         private void Update()
         {
+            if (IsOpen && !isSending && captureTabIndex == 1 && managedAviPreview != null)
+            {
+                managedAviPreview.Update(Time.unscaledDeltaTime);
+                if (!string.IsNullOrEmpty(managedAviPreview.Error))
+                    SetVideoPreviewError(managedAviPreview.Error);
+            }
             if (IsOpen && !isSending && videoCapture == null && videoRecorder != null && videoRecorder.IsEncoding)
             {
                 statusIsError = false;
                 status = "Encoding video in the background — you can keep typing.";
             }
 #if UNITY_IOS || UNITY_ANDROID
-            if (settings == null || IsOpen || isOpening || !settings.mobileThreeFingerGesture)
+            if (settings == null || IsOpen || isOpening || !settings.enableThreeFingerGesture)
             {
                 mobileGestureStartedAt = -1f;
                 mobileGestureTriggered = false;
@@ -151,7 +231,7 @@ namespace MacacaGames.RuntimeBugReporter
 
             if (mobileGestureStartedAt < 0f)
                 mobileGestureStartedAt = Time.unscaledTime;
-            if (!mobileGestureTriggered && Time.unscaledTime - mobileGestureStartedAt >= settings.mobileGestureHoldSeconds)
+            if (!mobileGestureTriggered && Time.unscaledTime - mobileGestureStartedAt >= settings.threeFingerGestureHoldSeconds)
             {
                 mobileGestureTriggered = true;
                 RequestOpen();
@@ -191,8 +271,15 @@ namespace MacacaGames.RuntimeBugReporter
             isOpening = true;
             status = "Capturing context…";
             screenshotBytes = null;
+            ResetVideoPreview();
+            videoPreviewDiagnosticError = null;
             videoCapture?.DeleteFile();
             videoCapture = null;
+            captureTabIndex = 0;
+            includeScreenshotInReport = false;
+            includeVideoInReport = false;
+            videoCaptureRequested = videoRecorder != null && videoRecorder.IsEnabled;
+            videoCaptureCompleted = false;
             screenshotAnnotator = null;
             videoRecorder.MarkIncident(result =>
             {
@@ -202,10 +289,13 @@ namespace MacacaGames.RuntimeBugReporter
                     return;
                 }
                 videoCapture = result;
+                videoCaptureCompleted = true;
+                includeVideoInReport = DefaultVideoInclusion(result);
+                var hasCapture = includeVideoInReport;
                 if (IsOpen)
                 {
-                    statusIsError = result == null;
-                    status = result == null
+                    statusIsError = !hasCapture;
+                    status = !hasCapture
                         ? "Video could not be finalized. The report can still be sent without it."
                         : result.Extension.TrimStart('.').ToUpperInvariant() + " video ready (" + result.DurationSeconds.ToString("0.0") + "s).";
                 }
@@ -216,23 +306,31 @@ namespace MacacaGames.RuntimeBugReporter
                 yield return CaptureUtility.CapturePng((bytes, texture) =>
                 {
                     screenshotBytes = bytes;
+                    includeScreenshotInReport = DefaultScreenshotInclusion(bytes);
                     if (screenshotPreview != null) Destroy(screenshotPreview);
                     screenshotPreview = texture;
                     screenshotAnnotator = texture == null ? null : new ScreenshotAnnotator(texture);
                 });
             }
 
-            previousCursorLock = Cursor.lockState;
-            previousCursorVisible = Cursor.visible;
-            Cursor.lockState = CursorLockMode.None;
-            Cursor.visible = true;
             isOpening = false;
             IsOpen = true;
+            softwareCursorInitialized = false;
+            softwareCursorDeltaFrame = -1;
+            softwareCursorButtonState = SoftwareCursorButtonState.None;
+            softwareCursorButtonFrame = -1;
+            softwareCursorPressedControl = 0;
+            softwareCursorScrollTarget = 0;
+            softwareCursorFocusedTextControl = null;
+            softwareCursorFocusedTextControlId = 0;
+            softwareCursorVideoPreviewTime = null;
             SetInputBlocker(true);
             pendingFocusControl = "BugReportTitle";
-            status = settings.enableRollingVideo && settings.secondsAfter > 0
+            status = !videoCaptureCompleted && videoCaptureRequested && settings.secondsAfter > 0
                 ? "Recording the seconds after the incident…"
-                : "Ready to send.";
+                : HasVideoCaptureFile(videoCapture)
+                    ? videoCapture.Extension.TrimStart('.').ToUpperInvariant() + " video ready (" + videoCapture.DurationSeconds.ToString("0.0") + "s)."
+                    : "Ready to send.";
         }
 
         private void OnGUI()
@@ -246,12 +344,41 @@ namespace MacacaGames.RuntimeBugReporter
                 if (IsOpen) Close(); else RequestOpen();
                 current.Use();
             }
-#if UNITY_IOS || UNITY_ANDROID
-            if (!IsOpen && !isOpening && settings.mobileEntryButton)
-                DrawMobileEntry();
-#endif
+            if (!IsOpen && !isOpening && settings.showEntryButton)
+                DrawEntryButton();
             if (!IsOpen)
                 return;
+
+            if (!IsSoftwareCursorActive())
+            {
+                softwareCursorInitialized = false;
+                softwareCursorDeltaFrame = -1;
+                softwareCursorButtonState = SoftwareCursorButtonState.None;
+                softwareCursorButtonFrame = -1;
+                softwareCursorPressedControl = 0;
+                softwareCursorScrollTarget = 0;
+                softwareCursorFocusedTextControl = null;
+                softwareCursorFocusedTextControlId = 0;
+                softwareCursorVideoPreviewTime = null;
+                DrawOpenReporter(current);
+                return;
+            }
+
+            UpdateSoftwareCursor(current);
+            PrepareSoftwareCursorButtonState(current);
+            try
+            {
+                DrawOpenReporter(current);
+                DrawSoftwareCursor(current);
+            }
+            finally
+            {
+                FinishSoftwareCursorButtonState();
+            }
+        }
+
+        private void DrawOpenReporter(Event current)
+        {
             if (settings.allowEscapeToClose && current.type == EventType.KeyDown && current.keyCode == KeyCode.Escape)
             {
                 Close();
@@ -312,16 +439,297 @@ namespace MacacaGames.RuntimeBugReporter
             }
             HandleScrollInput();
             GUI.color = Color.white;
-            windowRect = GUILayout.Window(GetInstanceID(), windowRect, DrawWindow, GUIContent.none, GUIStyle.none, GUILayout.Width(width), GUILayout.Height(height));
+            GUILayout.BeginArea(windowRect);
+            DrawWindow();
+            GUILayout.EndArea();
+        }
 
-            if (!string.IsNullOrEmpty(pendingFocusControl) && Event.current.type == EventType.Repaint)
+        internal static bool IsSoftwareCursorPlatform(bool isMobilePlatform, DeviceType deviceType, bool handheldModeEnabled)
+        {
+            return !isMobilePlatform && !handheldModeEnabled && deviceType != DeviceType.Handheld && deviceType != DeviceType.Console;
+        }
+
+        private static bool IsSoftwareCursorActive()
+        {
+            return ShouldUseSoftwareCursor(
+                BugReporter.SoftwareCursorEnabled,
+                IsSoftwareCursorPlatform(Application.isMobilePlatform, SystemInfo.deviceType, BugReporter.HandheldModeEnabled),
+                Cursor.visible,
+                Cursor.lockState);
+        }
+
+        internal static bool ShouldUseSoftwareCursor(
+            bool runtimeEnabled,
+            bool platformEligible,
+            bool cursorVisible,
+            CursorLockMode lockMode)
+        {
+            return runtimeEnabled && platformEligible && (!cursorVisible || lockMode == CursorLockMode.Locked);
+        }
+
+        internal static Vector2 NextSoftwareCursorPosition(
+            bool locked,
+            bool initialized,
+            Vector2 currentPosition,
+            Vector2 nativePosition,
+            Vector2 relativeDelta,
+            Rect bounds,
+            Vector2 visualSize)
+        {
+            var position = locked
+                ? (initialized ? currentPosition : bounds.center) + relativeDelta
+                : nativePosition;
+            return new Vector2(
+                Mathf.Clamp(position.x, bounds.xMin, Mathf.Max(bounds.xMin, bounds.xMax - visualSize.x)),
+                Mathf.Clamp(position.y, bounds.yMin, Mathf.Max(bounds.yMin, bounds.yMax - visualSize.y)));
+        }
+
+        private void UpdateSoftwareCursor(Event current)
+        {
+            var bounds = windowRect.width > 1f && windowRect.height > 1f
+                ? windowRect
+                : new Rect(0f, 0f, Screen.width, Screen.height);
+            var locked = Cursor.lockState == CursorLockMode.Locked;
+            var relativeDelta = Vector2.zero;
+            if (locked && softwareCursorDeltaFrame != Time.frameCount)
             {
-                GUI.FocusControl(pendingFocusControl);
-                pendingFocusControl = null;
+                relativeDelta = SoftwareCursorDeltaReader != null
+                    ? SoftwareCursorDeltaReader()
+                    : current.delta;
+                relativeDelta *= LockedSoftwareCursorSpeed * SoftwareCursorTravelScale(bounds.width, bounds.height);
+                softwareCursorDeltaFrame = Time.frameCount;
+            }
+            softwareCursorPosition = NextSoftwareCursorPosition(
+                locked,
+                softwareCursorInitialized,
+                softwareCursorPosition,
+                current.mousePosition,
+                relativeDelta,
+                bounds,
+                SoftwareCursorVisualSize(bounds.width, bounds.height));
+            softwareCursorInitialized = true;
+        }
+
+        private void PrepareSoftwareCursorButtonState(Event current)
+        {
+            softwareCursorButtonState = SoftwareCursorButtonState.None;
+            if (SoftwareCursorButtonReader != null)
+            {
+                if (current.type != EventType.Repaint || softwareCursorButtonFrame == Time.frameCount)
+                    return;
+
+                softwareCursorButtonState = SoftwareCursorButtonReader();
+                softwareCursorButtonFrame = Time.frameCount;
+            }
+            else if (current.button == 0)
+            {
+                if (current.type == EventType.MouseDown)
+                    softwareCursorButtonState = SoftwareCursorButtonState.Pressed | SoftwareCursorButtonState.Held;
+                else if (current.type == EventType.MouseDrag)
+                    softwareCursorButtonState = SoftwareCursorButtonState.Held;
+                else if (current.type == EventType.MouseUp)
+                    softwareCursorButtonState = SoftwareCursorButtonState.Released;
+            }
+
+            if ((softwareCursorButtonState & SoftwareCursorButtonState.Pressed) != 0)
+            {
+                softwareCursorPressedControl = 0;
+                softwareCursorScrollTarget = 0;
+                softwareCursorFocusedTextControl = null;
+                softwareCursorFocusedTextControlId = 0;
+                softwareCursorVideoPreviewTime = null;
+                GUIUtility.keyboardControl = 0;
             }
         }
 
-        private void DrawWindow(int id)
+        private void FinishSoftwareCursorButtonState()
+        {
+            if ((softwareCursorButtonState & SoftwareCursorButtonState.Released) != 0)
+            {
+                softwareCursorPressedControl = 0;
+                softwareCursorScrollTarget = 0;
+            }
+            softwareCursorButtonState = SoftwareCursorButtonState.None;
+        }
+
+        private bool HandleSoftwareCursorClick(int controlId, Rect rect)
+        {
+            if (!IsSoftwareCursorActive())
+                return false;
+
+            var hovered = SoftwareCursorContains(rect);
+            if ((softwareCursorButtonState & SoftwareCursorButtonState.Pressed) != 0
+                && softwareCursorPressedControl == 0
+                && GUI.enabled
+                && hovered)
+            {
+                softwareCursorPressedControl = controlId;
+            }
+
+            return (softwareCursorButtonState & SoftwareCursorButtonState.Released) != 0
+                && softwareCursorPressedControl == controlId
+                && GUI.enabled
+                && hovered;
+        }
+
+        private bool SoftwareCursorContains(Rect rect)
+        {
+            var screenRect = new Rect(GUIUtility.GUIToScreenPoint(rect.position), rect.size);
+            return screenRect.Contains(softwareCursorPosition);
+        }
+
+        private bool SoftwareCursorButton(string label, GUIStyle style, params GUILayoutOption[] options)
+        {
+            if (!IsSoftwareCursorActive())
+                return GUILayout.Button(label, style, options);
+
+            var content = new GUIContent(label);
+            var rect = GUILayoutUtility.GetRect(content, style, options);
+            var controlId = GUIUtility.GetControlID(FocusType.Passive, rect);
+            var hovered = SoftwareCursorContains(rect);
+            var active = softwareCursorPressedControl == controlId;
+            if (Event.current.type == EventType.Repaint)
+                style.Draw(rect, content, hovered, active, false, false);
+            return HandleSoftwareCursorClick(controlId, rect);
+        }
+
+        private bool SoftwareCursorToggle(bool value, string label, GUIStyle style, params GUILayoutOption[] options)
+        {
+            if (!IsSoftwareCursorActive())
+                return GUILayout.Toggle(value, label, style, options);
+
+            var content = new GUIContent(label);
+            var rect = GUILayoutUtility.GetRect(content, style, options);
+            var controlId = GUIUtility.GetControlID(FocusType.Passive, rect);
+            var hovered = SoftwareCursorContains(rect);
+            var active = softwareCursorPressedControl == controlId;
+            if (Event.current.type == EventType.Repaint)
+                style.Draw(rect, content, hovered, active, value, false);
+            return HandleSoftwareCursorClick(controlId, rect) ? !value : value;
+        }
+
+        private int SoftwareCursorSelectionGrid(
+            int selected,
+            string[] labels,
+            int columns,
+            GUIStyle style,
+            params GUILayoutOption[] options)
+        {
+            if (!IsSoftwareCursorActive())
+                return GUILayout.SelectionGrid(selected, labels, columns, style, options);
+
+            var rect = GUILayoutUtility.GetRect(GUIContent.none, style, options);
+            var rows = Mathf.CeilToInt(labels.Length / (float)columns);
+            var cellWidth = rect.width / columns;
+            var cellHeight = rect.height / rows;
+            for (var index = 0; index < labels.Length; index++)
+            {
+                var cellRect = new Rect(
+                    rect.x + index % columns * cellWidth,
+                    rect.y + index / columns * cellHeight,
+                    cellWidth,
+                    cellHeight);
+                var controlId = GUIUtility.GetControlID(FocusType.Passive, cellRect);
+                if (Event.current.type == EventType.Repaint)
+                {
+                    style.Draw(
+                        cellRect,
+                        new GUIContent(labels[index]),
+                        SoftwareCursorContains(cellRect),
+                        softwareCursorPressedControl == controlId,
+                        index == selected,
+                        false);
+                }
+                if (HandleSoftwareCursorClick(controlId, cellRect))
+                    return index;
+            }
+            return selected;
+        }
+
+        private void FocusSoftwareCursorControl(string controlName, Rect rect)
+        {
+            var eventType = Event.current.type;
+            var focusRequested = pendingFocusControl == controlName && eventType == EventType.Repaint;
+            if (focusRequested)
+                pendingFocusControl = null;
+
+            if (!IsSoftwareCursorActive())
+            {
+                if (focusRequested)
+                    GUI.FocusControl(controlName);
+                return;
+            }
+
+            var controlId = GUIUtility.GetControlID(controlName.GetHashCode(), FocusType.Passive, rect);
+            HandleSoftwareCursorClick(controlId, rect);
+            focusRequested |= softwareCursorPressedControl == controlId
+                && (softwareCursorButtonState & SoftwareCursorButtonState.Pressed) != 0;
+            if (focusRequested)
+            {
+                softwareCursorFocusedTextControl = controlName;
+                GUI.FocusControl(controlName);
+                softwareCursorFocusedTextControlId = GUIUtility.keyboardControl;
+                return;
+            }
+
+            if (softwareCursorFocusedTextControl != controlName || !ShouldRefreshSoftwareCursorTextFocus(eventType))
+                return;
+
+            GUI.FocusControl(controlName);
+            if (GUIUtility.keyboardControl != 0)
+                softwareCursorFocusedTextControlId = GUIUtility.keyboardControl;
+        }
+
+        private void RestoreSoftwareCursorTextFocus(string controlName)
+        {
+            if (IsSoftwareCursorActive()
+                && softwareCursorFocusedTextControl == controlName
+                && softwareCursorFocusedTextControlId != 0)
+            {
+                GUIUtility.keyboardControl = softwareCursorFocusedTextControlId;
+            }
+        }
+
+        internal static bool ShouldRefreshSoftwareCursorTextFocus(EventType eventType)
+        {
+            return eventType == EventType.Layout;
+        }
+
+        internal static float SoftwareCursorTravelScale(float boundsWidth, float boundsHeight)
+        {
+            return Mathf.Min(
+                Mathf.Max(1f, boundsWidth) / 1920f,
+                Mathf.Max(1f, boundsHeight) / 1080f);
+        }
+
+        internal static Vector2 SoftwareCursorVisualSize(float boundsWidth, float boundsHeight)
+        {
+            var scale = SoftwareCursorTravelScale(boundsWidth, boundsHeight);
+            return new Vector2(12f * scale, 16f * scale);
+        }
+
+        private void DrawSoftwareCursor(Event current)
+        {
+            if (!IsOpen || current.type != EventType.Repaint || softwareCursorTexture == null)
+                return;
+
+            var previousColor = GUI.color;
+            var previousDepth = GUI.depth;
+            GUI.color = Color.white;
+            GUI.depth = -10001;
+            GUI.DrawTexture(new Rect(
+                softwareCursorPosition,
+                SoftwareCursorVisualSize(windowRect.width, windowRect.height)), softwareCursorTexture);
+            GUI.depth = previousDepth;
+            GUI.color = previousColor;
+        }
+
+        private void DrawWindow()
+        {
+            DrawWindowContents();
+        }
+
+        private void DrawWindowContents()
         {
             GUI.DrawTexture(new Rect(0, 0, windowRect.width, windowRect.height), windowTexture);
             GUI.DrawTexture(new Rect(0, 0, Mathf.Max(4f, 4f * styleScale), windowRect.height), accentTexture);
@@ -338,7 +746,7 @@ namespace MacacaGames.RuntimeBugReporter
             if (!IsMobileLayout())
                 GUILayout.Label(settings.shortcut + "  toggle", hintStyle, GUILayout.Width(88 * styleScale));
             GUI.enabled = !isSending;
-            if (GUILayout.Button("CLOSE", closeButtonStyle, GUILayout.Width(82 * styleScale), GUILayout.Height(44 * styleScale)))
+            if (SoftwareCursorButton("CLOSE", closeButtonStyle, GUILayout.Width(82 * styleScale), GUILayout.Height(44 * styleScale)))
                 Close();
             GUI.enabled = true;
             GUILayout.Space(28 * styleScale);
@@ -374,21 +782,21 @@ namespace MacacaGames.RuntimeBugReporter
             if (IsMobileLayout())
             {
                 var mobileButtonWidth = (windowRect.width - footerPadding * 2f - 8f * styleScale) * 0.5f;
-                if (GUILayout.Button("CANCEL", buttonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(mobileButtonWidth)))
+                if (SoftwareCursorButton("CANCEL", buttonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(mobileButtonWidth)))
                     Close();
                 GUI.enabled = canSend;
-                if (GUILayout.Button(sendLabel, primaryButtonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(mobileButtonWidth)))
+                if (SoftwareCursorButton(sendLabel, primaryButtonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(mobileButtonWidth)))
                     TryBeginSend();
             }
             else
             {
-                if (GUILayout.Button("CANCEL", buttonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(120 * styleScale)))
+                if (SoftwareCursorButton("CANCEL", buttonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(120 * styleScale)))
                     Close();
                 GUI.enabled = true;
                 GUILayout.FlexibleSpace();
                 GUILayout.Label("Ctrl / Cmd + Enter", hintStyle, GUILayout.Width(142 * styleScale));
                 GUI.enabled = canSend;
-                if (GUILayout.Button(sendLabel, primaryButtonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(190 * styleScale)))
+                if (SoftwareCursorButton(sendLabel, primaryButtonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(190 * styleScale)))
                     TryBeginSend();
             }
             GUI.enabled = true;
@@ -411,9 +819,7 @@ namespace MacacaGames.RuntimeBugReporter
             contentScroll = GUILayout.BeginScrollView(contentScroll, false, true, GUILayout.ExpandHeight(true));
             var previewWidth = Mathf.Max(100f,
                 leftWidth - cardStyle.padding.left - cardStyle.padding.right - 24f * styleScale);
-            DrawScreenshotPanel(previewWidth, Mathf.Clamp(contentHeight * 0.36f, 220f, 480f));
-            GUILayout.Space(16 * styleScale);
-            DrawCaptureSummary();
+            DrawCaptureReviewPanel(previewWidth, Mathf.Clamp(contentHeight * 0.36f, 220f, 480f));
             GUILayout.FlexibleSpace();
             GUILayout.Label(settings.privacyNotice, hintStyle);
             GUILayout.EndScrollView();
@@ -461,14 +867,44 @@ namespace MacacaGames.RuntimeBugReporter
             return Mathf.Max(220f, windowRect.height - 94f * styleScale - 86f * styleScale);
         }
 
+        internal static Rect ToGuiSafeArea(Rect safeArea, float screenHeight)
+        {
+            return new Rect(safeArea.x, screenHeight - safeArea.yMax, safeArea.width, safeArea.height);
+        }
+
+        internal static float SelectEntryButtonBaseSize(bool mobile, float desktopSize, float mobileSize)
+        {
+            return mobile ? mobileSize : desktopSize;
+        }
+
+        internal static Rect GetEntryButtonRect(Rect safeArea, float size, float margin, EntryButtonCorner corner)
+        {
+            var left = corner == EntryButtonCorner.TopLeft || corner == EntryButtonCorner.BottomLeft;
+            var top = corner == EntryButtonCorner.TopLeft || corner == EntryButtonCorner.TopRight;
+            return new Rect(
+                left ? safeArea.xMin + margin : safeArea.xMax - size - margin,
+                top ? safeArea.yMin + margin : safeArea.yMax - size - margin,
+                size,
+                size);
+        }
+
+        internal static Rect GetEntryShortcutRect(Rect buttonRect, float width, float gap, EntryButtonCorner corner)
+        {
+            var left = corner == EntryButtonCorner.TopLeft || corner == EntryButtonCorner.BottomLeft;
+            return new Rect(
+                left ? buttonRect.xMax + gap : buttonRect.xMin - gap - width,
+                buttonRect.y,
+                width,
+                buttonRect.height);
+        }
+
         private Rect GetSafeAreaGuiRect()
         {
-            var safeArea = Screen.safeArea;
-            var topLeftY = Screen.height - safeArea.yMax;
+            var safeArea = ToGuiSafeArea(Screen.safeArea, Screen.height);
             var inset = Screen.width <= MobileLayoutMaximumWidth ? 8f : 0f;
             return new Rect(
                 safeArea.xMin + inset,
-                topLeftY + inset,
+                safeArea.yMin + inset,
                 Mathf.Max(1f, safeArea.width - inset * 2f),
                 Mathf.Max(1f, safeArea.height - inset * 2f));
         }
@@ -476,9 +912,10 @@ namespace MacacaGames.RuntimeBugReporter
         private void HandleScrollInput()
         {
             var current = Event.current;
+            HandleSoftwareCursorScrollbarDrag();
             if (current.type == EventType.ScrollWheel)
             {
-                var target = GetScrollTarget(current.mousePosition);
+                var target = GetScrollTarget(IsSoftwareCursorActive() ? softwareCursorPosition : current.mousePosition);
                 if (target == 1)
                     contentScroll.y = Mathf.Max(0f, contentScroll.y + current.delta.y * 24f);
                 else if (target == 2)
@@ -533,6 +970,77 @@ namespace MacacaGames.RuntimeBugReporter
                 touchScrollId = -1;
         }
 
+        private void HandleSoftwareCursorScrollbarDrag()
+        {
+            if (!IsSoftwareCursorActive())
+                return;
+
+            if ((softwareCursorButtonState & SoftwareCursorButtonState.Pressed) != 0
+                && softwareCursorPressedControl == 0)
+            {
+                softwareCursorScrollTarget = GetSoftwareCursorScrollbarTarget(
+                    softwareCursorPosition,
+                    windowRect,
+                    styleScale,
+                    CanUseDesktopLayout());
+                if (softwareCursorScrollTarget != 0)
+                {
+                    softwareCursorPressedControl = ScrollbarControlHash + softwareCursorScrollTarget;
+                    softwareCursorScrollLastY = softwareCursorPosition.y;
+                }
+            }
+
+            if (softwareCursorScrollTarget == 0
+                || softwareCursorPressedControl != ScrollbarControlHash + softwareCursorScrollTarget)
+                return;
+
+            if ((softwareCursorButtonState & (SoftwareCursorButtonState.Held | SoftwareCursorButtonState.Released)) != 0)
+            {
+                var deltaY = softwareCursorPosition.y - softwareCursorScrollLastY;
+                if (softwareCursorScrollTarget == 1)
+                    contentScroll.y = NextSoftwareCursorScrollPosition(contentScroll.y, deltaY);
+                else
+                    formScroll.y = NextSoftwareCursorScrollPosition(formScroll.y, deltaY);
+                softwareCursorScrollLastY = softwareCursorPosition.y;
+            }
+        }
+
+        internal static int GetSoftwareCursorScrollbarTarget(
+            Vector2 point,
+            Rect reportWindow,
+            float scale,
+            bool desktopLayout)
+        {
+            scale = Mathf.Max(0.1f, scale);
+            var top = reportWindow.y + (94f + 18f) * scale;
+            var bottom = reportWindow.yMax - (86f + 18f) * scale;
+            if (point.y < top || point.y > bottom)
+                return 0;
+
+            var outerPadding = 28f * scale;
+            var cardRightPadding = 20f * scale;
+            var gutterWidth = Mathf.Max(16f, 18f * scale);
+            if (!desktopLayout)
+            {
+                var right = reportWindow.xMax - outerPadding - cardRightPadding;
+                return point.x >= right - gutterWidth && point.x <= right ? 2 : 0;
+            }
+
+            var availableWidth = reportWindow.width - outerPadding * 2f;
+            var leftWidth = availableWidth * 0.44f;
+            var leftRight = reportWindow.x + outerPadding + leftWidth - cardRightPadding;
+            if (point.x >= leftRight - gutterWidth && point.x <= leftRight)
+                return 1;
+
+            var rightRight = reportWindow.xMax - outerPadding - cardRightPadding;
+            return point.x >= rightRight - gutterWidth && point.x <= rightRight ? 2 : 0;
+        }
+
+        internal static float NextSoftwareCursorScrollPosition(float current, float pointerDeltaY)
+        {
+            return Mathf.Max(0f, current + pointerDeltaY * 2f);
+        }
+
         private int GetScrollTarget(Vector2 point)
         {
             if (!windowRect.Contains(point))
@@ -553,9 +1061,7 @@ namespace MacacaGames.RuntimeBugReporter
             formScroll = GUILayout.BeginScrollView(formScroll, false, true, GUILayout.ExpandHeight(true));
             var previewWidth = Mathf.Max(100f,
                 windowRect.width - 56f * styleScale - cardStyle.padding.left - cardStyle.padding.right - 24f * styleScale);
-            DrawScreenshotPanel(previewWidth, Mathf.Clamp(windowRect.width * 0.58f, 200f, 460f));
-            GUILayout.Space(14 * styleScale);
-            DrawCaptureSummary();
+            DrawCaptureReviewPanel(previewWidth, Mathf.Clamp(windowRect.width * 0.58f, 200f, 460f));
             GUILayout.Space(18 * styleScale);
             DrawForm(true);
             GUILayout.Space(12 * styleScale);
@@ -566,12 +1072,36 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.EndHorizontal();
         }
 
+        private void DrawCaptureReviewPanel(float previewWidth, float fallbackHeight)
+        {
+            var previousTab = captureTabIndex;
+            captureTabIndex = SoftwareCursorSelectionGrid(
+                captureTabIndex,
+                CaptureTabLabels,
+                CaptureTabLabels.Length,
+                categoryStyle,
+                GUILayout.Height(44f * styleScale));
+            if (previousTab == 1 && captureTabIndex == 0)
+            {
+                softwareCursorVideoPreviewTime = null;
+                if (videoPlayer != null && videoPlayer.isPlaying)
+                    videoPlayer.Pause();
+                managedAviPreview?.Pause();
+            }
+
+            GUILayout.Space(10f * styleScale);
+            if (captureTabIndex == 0)
+                DrawScreenshotPanel(previewWidth, fallbackHeight);
+            else
+                DrawVideoPanel(previewWidth, fallbackHeight);
+        }
+
         private void DrawScreenshotPanel(float previewWidth, float fallbackHeight)
         {
             GUILayout.BeginHorizontal();
             DrawLabel("SCREENSHOT");
             GUILayout.FlexibleSpace();
-            statusStyle.normal.textColor = new Color(0.09f, 0.48f, 0.50f);
+            SetStaticLabelColor(statusStyle, new Color(0.09f, 0.48f, 0.50f));
             GUILayout.Label(screenshotBytes != null ? "READY" : "UNAVAILABLE", statusStyle);
             GUILayout.EndHorizontal();
 
@@ -610,19 +1140,573 @@ namespace MacacaGames.RuntimeBugReporter
             }
 
             GUILayout.Space(10 * styleScale);
-            DrawAnnotationToolbar(!isSending && !isOpening && screenshotAnnotator != null);
+            DrawAnnotationToolbar(!isSending && !isOpening && screenshotAnnotator != null, previewWidth);
             GUI.enabled = true;
         }
 
-        private void DrawAnnotationToolbar(bool canInteract)
+        private void DrawVideoPanel(float previewWidth, float fallbackHeight)
         {
-            var compact = !CanUseDesktopLayout();
-            if (compact)
+            var reviewState = CurrentVideoReviewState();
+            GUILayout.BeginHorizontal();
+            DrawLabel("VIDEO REVIEW");
+            GUILayout.FlexibleSpace();
+            SetStaticLabelColor(statusStyle, reviewState == VideoReviewState.Unavailable
+                ? new Color(0.70f, 0.23f, 0.20f)
+                : new Color(0.09f, 0.48f, 0.50f));
+            GUILayout.Label(VideoReviewStatusLabel(reviewState), statusStyle);
+            GUILayout.EndHorizontal();
+
+            var previewHeight = Mathf.Max(160f * styleScale, fallbackHeight);
+            GUILayout.BeginHorizontal();
+            GUILayout.FlexibleSpace();
+            var rect = GUILayoutUtility.GetRect(
+                previewWidth,
+                previewHeight,
+                GUILayout.Width(previewWidth),
+                GUILayout.Height(previewHeight));
+            GUILayout.FlexibleSpace();
+            GUILayout.EndHorizontal();
+            GUI.DrawTexture(rect, fieldTexture);
+
+            if (reviewState == VideoReviewState.Ready)
+                EnsureVideoPreview();
+
+            var texture = PreviewTexture();
+            if (reviewState == VideoReviewState.Ready && texture != null)
+            {
+                var imageRect = new Rect(rect.x + 3f, rect.y + 3f, rect.width - 6f, rect.height - 6f);
+                GUI.DrawTexture(imageRect, texture, ScaleMode.ScaleToFit, false);
+                DrawVideoInteraction(imageRect);
+            }
+            else
+            {
+                GUI.Label(rect, VideoReviewMessage(reviewState), previewMessageStyle);
+            }
+        }
+
+        private void DrawVideoInteraction(Rect imageRect)
+        {
+            var duration = PreviewDuration();
+            var overlayHeight = (IsMobileLayout() ? 52f : 44f) * styleScale;
+            var overlayRect = new Rect(imageRect.x, imageRect.yMax - overlayHeight, imageRect.width, overlayHeight);
+            var horizontalPadding = 14f * styleScale;
+            var trackRect = new Rect(
+                overlayRect.x + horizontalPadding,
+                overlayRect.y + 11f * styleScale,
+                Mathf.Max(1f, overlayRect.width - horizontalPadding * 2f),
+                4f * styleScale);
+            var seekHitRect = new Rect(trackRect.x, overlayRect.y, trackRect.width, 28f * styleScale);
+            var seekControlId = GUIUtility.GetControlID(VideoSeekControlHash, FocusType.Passive, seekHitRect);
+            var pointerOverVideo = IsSoftwareCursorActive()
+                ? SoftwareCursorContains(imageRect)
+                : imageRect.Contains(Event.current.mousePosition);
+            var isSeeking = IsSoftwareCursorActive()
+                ? softwareCursorPressedControl == seekControlId
+                : GUIUtility.hotControl == seekControlId;
+            var showControls = !PreviewIsPlaying() || pointerOverVideo || isSeeking;
+
+            if (showControls)
+            {
+                DrawVideoTimeline(overlayRect, trackRect, duration);
+                HandleVideoSeek(seekControlId, seekHitRect, duration);
+            }
+
+            if (IsSoftwareCursorActive())
+            {
+                var videoControlId = GUIUtility.GetControlID("MacacaBeaconVideoPlayback".GetHashCode(), FocusType.Passive, imageRect);
+                if (!isSending && ShouldActivateSoftwareCursorVideoSurface(
+                    softwareCursorButtonState,
+                    softwareCursorPressedControl,
+                    SoftwareCursorContains(imageRect)))
+                {
+                    softwareCursorPressedControl = videoControlId;
+                    ToggleVideoPlayback();
+                }
+            }
+            else
+            {
+                var current = Event.current;
+                if (!isSending && current.type == EventType.MouseDown && current.button == 0 && imageRect.Contains(current.mousePosition))
+                {
+                    ToggleVideoPlayback();
+                    current.Use();
+                }
+            }
+        }
+
+        private void DrawVideoTimeline(Rect overlayRect, Rect trackRect, double duration)
+        {
+            if (Event.current.type != EventType.Repaint)
+                return;
+
+            var previousColor = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.68f);
+            GUI.DrawTexture(overlayRect, Texture2D.whiteTexture);
+            GUI.color = new Color(1f, 1f, 1f, 0.38f);
+            GUI.DrawTexture(trackRect, Texture2D.whiteTexture);
+
+            var displayedTime = softwareCursorVideoPreviewTime ?? PreviewTime();
+            var progress = duration > 0d ? Mathf.Clamp01((float)(displayedTime / duration)) : 0f;
+            var playedRect = new Rect(trackRect.x, trackRect.y, trackRect.width * progress, trackRect.height);
+            GUI.color = new Color(0.09f, 0.70f, 0.72f, 1f);
+            GUI.DrawTexture(playedRect, Texture2D.whiteTexture);
+            var handleSize = 10f * styleScale;
+            GUI.DrawTexture(
+                new Rect(trackRect.x + trackRect.width * progress - handleSize * 0.5f, trackRect.center.y - handleSize * 0.5f, handleSize, handleSize),
+                Texture2D.whiteTexture);
+            GUI.color = previousColor;
+
+            var timeRect = new Rect(
+                overlayRect.x + 12f * styleScale,
+                overlayRect.y + 20f * styleScale,
+                overlayRect.width - 24f * styleScale,
+                22f * styleScale);
+            hintStyle.Draw(
+                timeRect,
+                new GUIContent(FormatVideoTime(displayedTime) + " / " + FormatVideoTime(duration)),
+                false,
+                false,
+                false,
+                false);
+        }
+
+        private void HandleVideoSeek(int controlId, Rect hitRect, double duration)
+        {
+            if (isSending || !PreviewCanSetTime() || duration <= 0d)
+                return;
+
+            if (IsSoftwareCursorActive())
+            {
+                var screenRect = new Rect(GUIUtility.GUIToScreenPoint(hitRect.position), hitRect.size);
+                if ((softwareCursorButtonState & SoftwareCursorButtonState.Pressed) != 0
+                    && softwareCursorPressedControl == 0
+                    && screenRect.Contains(softwareCursorPosition))
+                {
+                    softwareCursorPressedControl = controlId;
+                }
+                if (softwareCursorPressedControl == controlId
+                    && (softwareCursorButtonState & (SoftwareCursorButtonState.Pressed | SoftwareCursorButtonState.Held | SoftwareCursorButtonState.Released)) != 0)
+                {
+                    softwareCursorVideoPreviewTime = VideoTimeFromPointer(
+                        softwareCursorPosition.x,
+                        screenRect.xMin,
+                        screenRect.width,
+                        duration);
+                    if (ShouldCommitSoftwareCursorVideoSeek(softwareCursorButtonState))
+                    {
+                        SetPreviewTime(softwareCursorVideoPreviewTime.Value);
+                        softwareCursorVideoPreviewTime = null;
+                    }
+                }
+                return;
+            }
+
+            var current = Event.current;
+            switch (current.GetTypeForControl(controlId))
+            {
+                case EventType.MouseDown:
+                    if (current.button != 0 || !hitRect.Contains(current.mousePosition))
+                        return;
+                    GUIUtility.hotControl = controlId;
+                    SeekVideo(current.mousePosition.x, hitRect, duration);
+                    current.Use();
+                    break;
+                case EventType.MouseDrag:
+                    if (GUIUtility.hotControl != controlId)
+                        return;
+                    SeekVideo(current.mousePosition.x, hitRect, duration);
+                    current.Use();
+                    break;
+                case EventType.MouseUp:
+                    if (GUIUtility.hotControl != controlId || current.button != 0)
+                        return;
+                    SeekVideo(current.mousePosition.x, hitRect, duration);
+                    GUIUtility.hotControl = 0;
+                    current.Use();
+                    break;
+            }
+        }
+
+        private void SeekVideo(float pointerX, Rect trackRect, double duration)
+        {
+            SetPreviewTime(VideoTimeFromPointer(pointerX, trackRect.xMin, trackRect.width, duration));
+        }
+
+        internal static bool ShouldActivateSoftwareCursorVideoSurface(
+            SoftwareCursorButtonState buttonState,
+            int pressedControl,
+            bool pointerOverVideo)
+        {
+            return (buttonState & SoftwareCursorButtonState.Pressed) != 0
+                && pressedControl == 0
+                && pointerOverVideo;
+        }
+
+        internal static bool ShouldCommitSoftwareCursorVideoSeek(SoftwareCursorButtonState buttonState)
+        {
+            return (buttonState & SoftwareCursorButtonState.Released) != 0;
+        }
+
+        private void ToggleVideoPlayback()
+        {
+            if (managedAviPreview != null)
+            {
+                if (managedAviPreview.IsPlaying)
+                    managedAviPreview.Pause();
+                else
+                    managedAviPreview.Play();
+                return;
+            }
+
+            if (videoPlayer != null && videoPlayer.isPlaying)
+            {
+                videoPlayer.Pause();
+                return;
+            }
+
+            if (videoPlayer != null && videoPlayer.length > 0d && videoPlayer.time >= videoPlayer.length - 0.05d)
+                videoPlayer.time = 0d;
+            videoPlayer?.Play();
+        }
+
+        private void EnsureVideoPreview()
+        {
+            if (isSending || !HasVideoCaptureFile(videoCapture) || !CanPreviewVideo(videoCapture.Extension, IsWebGlPlayer()))
+                return;
+            if (preparedVideoPath == videoCapture.FilePath &&
+                (managedAviPreview != null || videoPlayer != null))
+                return;
+
+            ResetVideoPreview();
+            preparedVideoPath = videoCapture.FilePath;
+            if (videoPlayer == null)
+            {
+                videoPlayer = gameObject.AddComponent<VideoPlayer>();
+                videoPlayer.playOnAwake = false;
+                videoPlayer.renderMode = VideoRenderMode.APIOnly;
+                videoPlayer.audioOutputMode = VideoAudioOutputMode.None;
+                videoPlayer.isLooping = false;
+                videoPlayer.skipOnDrop = true;
+                videoPlayer.prepareCompleted += OnVideoPrepared;
+                videoPlayer.errorReceived += OnVideoError;
+            }
+
+            videoPlayer.source = VideoSource.Url;
+            videoPlayer.url = preparedVideoPath;
+            videoPlayer.Prepare();
+        }
+
+        private void ResetVideoPreview()
+        {
+            softwareCursorVideoPreviewTime = null;
+            managedAviPreview?.Dispose();
+            managedAviPreview = null;
+            if (videoPlayer != null)
+            {
+                videoPlayer.frameReady -= OnVideoFirstFrameReady;
+                videoPlayer.sendFrameReadyEvents = false;
+                videoPlayer.Stop();
+                videoPlayer.url = string.Empty;
+            }
+            preparedVideoPath = null;
+            videoPreviewError = null;
+        }
+
+        private void OnVideoPrepared(VideoPlayer source)
+        {
+            if (source == videoPlayer && source.url == preparedVideoPath)
+            {
+                if (ShouldFallbackToManagedMjpegPreview(
+                        videoCapture,
+                        IsWebGlPlayer(),
+                        source.length,
+                        source.width,
+                        source.height,
+                        source.frameCount))
+                {
+                    RecoverManagedMjpegPreview(
+                        "Unity decoder returned metadata inconsistent with the capture" +
+                        " (decoded " + source.width + "x" + source.height +
+                        ", " + source.length.ToString("0.00", CultureInfo.InvariantCulture) + "s" +
+                        ", " + source.frameCount + " frames; expected " +
+                        videoCapture.Width + "x" + videoCapture.Height +
+                        ", " + videoCapture.DurationSeconds.ToString("0.00", CultureInfo.InvariantCulture) + "s" +
+                        ", " + videoCapture.FrameCount + " frames)."
+                    );
+                    return;
+                }
+                videoPreviewError = null;
+                source.frameReady -= OnVideoFirstFrameReady;
+                source.frameReady += OnVideoFirstFrameReady;
+                source.sendFrameReadyEvents = true;
+                source.Play();
+            }
+        }
+
+        private void OnVideoFirstFrameReady(VideoPlayer source, long frameIndex)
+        {
+            source.frameReady -= OnVideoFirstFrameReady;
+            source.sendFrameReadyEvents = false;
+            if (source == videoPlayer && source.url == preparedVideoPath)
+                source.Pause();
+        }
+
+        private void OnVideoError(VideoPlayer source, string message)
+        {
+            if (source == videoPlayer && source.url == preparedVideoPath)
+            {
+                softwareCursorVideoPreviewTime = null;
+                var error = string.IsNullOrEmpty(message) ? "Unity could not preview this video." : message;
+                if (RecoverManagedMjpegPreview(error))
+                    return;
+                SetVideoPreviewError(error);
+                source.Stop();
+                source.url = string.Empty;
+            }
+        }
+
+        private bool RecoverManagedMjpegPreview(string decoderError)
+        {
+            if (!CanUseManagedMjpegFallback(videoCapture, IsWebGlPlayer()))
+                return false;
+
+            if (videoPlayer != null)
+            {
+                videoPlayer.frameReady -= OnVideoFirstFrameReady;
+                videoPlayer.sendFrameReadyEvents = false;
+                videoPlayer.Stop();
+                videoPlayer.url = string.Empty;
+            }
+            var maximumBytes = Math.Max(1L, settings.maximumAttachmentMegabytes) * 1024L * 1024L;
+            if (ManagedMjpegAviPreview.TryCreate(
+                    preparedVideoPath,
+                    videoCapture.DurationSeconds,
+                    maximumBytes,
+                    out managedAviPreview,
+                    out var fallbackError))
+            {
+                videoPreviewError = null;
+                Debug.LogWarning("[Macaca Beacon] " + decoderError + " Using managed MJPEG preview fallback.");
+                return true;
+            }
+
+            SetVideoPreviewError(decoderError + " Managed MJPEG fallback failed: " + fallbackError);
+            return true;
+        }
+
+        private void SetVideoPreviewError(string message)
+        {
+            if (!string.IsNullOrEmpty(videoPreviewError))
+                return;
+            videoPreviewError = string.IsNullOrEmpty(message) ? "Video preview failed." : message;
+            videoPreviewDiagnosticError = videoPreviewError;
+            Debug.LogWarning("[Macaca Beacon] Video preview failed: " + videoPreviewError);
+            managedAviPreview?.Pause();
+        }
+
+        private VideoReviewState CurrentVideoReviewState()
+        {
+            var hasFile = HasVideoCaptureFile(videoCapture);
+            var previewUnavailable = hasFile &&
+                (!CanPreviewVideo(videoCapture.Extension, IsWebGlPlayer()) || !string.IsNullOrEmpty(videoPreviewError));
+            return GetVideoReviewState(videoCaptureRequested && !videoCaptureCompleted, hasFile, previewUnavailable);
+        }
+
+        internal static VideoReviewState GetVideoReviewState(bool preparing, bool hasCaptureFile, bool previewUnavailable)
+        {
+            if (!hasCaptureFile)
+                return preparing ? VideoReviewState.Preparing : VideoReviewState.Unavailable;
+            return previewUnavailable ? VideoReviewState.PreviewUnavailable : VideoReviewState.Ready;
+        }
+
+        internal static bool HasVideoCaptureFile(VideoCaptureResult capture)
+        {
+            if (capture == null || string.IsNullOrEmpty(capture.FilePath) || !File.Exists(capture.FilePath))
+                return false;
+            try { return new FileInfo(capture.FilePath).Length > 0; }
+            catch { return false; }
+        }
+
+        internal static bool DefaultVideoInclusion(VideoCaptureResult capture)
+        {
+            return HasVideoCaptureFile(capture);
+        }
+
+        internal static bool DefaultScreenshotInclusion(byte[] screenshot)
+        {
+            return screenshot != null && screenshot.Length > 0;
+        }
+
+        internal static bool ShouldAttachScreenshot(bool includeScreenshot, byte[] screenshot)
+        {
+            return includeScreenshot && DefaultScreenshotInclusion(screenshot);
+        }
+
+        internal static bool ShouldAttachVideo(bool includeVideo, VideoCaptureResult capture)
+        {
+            return includeVideo && HasVideoCaptureFile(capture);
+        }
+
+        internal static bool CanPreviewVideo(string extension, bool webGlPlayer)
+        {
+            return !webGlPlayer &&
+                   (string.Equals(extension, ".mp4", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(extension, ".avi", StringComparison.OrdinalIgnoreCase));
+        }
+
+        internal static bool CanUseManagedMjpegFallback(VideoCaptureResult capture, bool webGlPlayer)
+        {
+            return !webGlPlayer && capture != null &&
+                   string.Equals(capture.Extension, ".avi", StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(capture.EncoderName, VideoEncoderBackend.ManagedAviEncoderName, StringComparison.Ordinal);
+        }
+
+        internal static bool ShouldFallbackToManagedMjpegPreview(
+            VideoCaptureResult capture,
+            bool webGlPlayer,
+            double decodedDuration,
+            ulong decodedWidth,
+            ulong decodedHeight,
+            ulong decodedFrameCount)
+        {
+            if (!CanUseManagedMjpegFallback(capture, webGlPlayer))
+                return false;
+
+            if (capture.DurationSeconds > 0d)
+            {
+                var durationTolerance = Math.Max(0.75d, capture.DurationSeconds * 0.2d);
+                if (decodedDuration <= 0d || Math.Abs(decodedDuration - capture.DurationSeconds) > durationTolerance)
+                    return true;
+            }
+
+            if (capture.Width > 0 && capture.Height > 0 && decodedWidth > 0 && decodedHeight > 0)
+            {
+                var expectedAspect = capture.Width / (double)capture.Height;
+                var decodedAspect = decodedWidth / (double)decodedHeight;
+                if (Math.Abs(decodedAspect - expectedAspect) / expectedAspect > 0.03d)
+                    return true;
+            }
+
+            if (capture.FrameCount > 0 && decodedFrameCount > 0 && decodedFrameCount != ulong.MaxValue)
+            {
+                var frameTolerance = Math.Max(2d, capture.FrameCount * 0.25d);
+                if (Math.Abs(decodedFrameCount - (double)capture.FrameCount) > frameTolerance)
+                    return true;
+            }
+            return false;
+        }
+
+        internal static double VideoTimeFromPointer(double pointerX, double trackX, double trackWidth, double duration)
+        {
+            if (trackWidth <= 0d || duration <= 0d)
+                return 0d;
+            return Math.Max(0d, Math.Min(1d, (pointerX - trackX) / trackWidth)) * duration;
+        }
+
+        private static bool IsWebGlPlayer()
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            return true;
+#else
+            return false;
+#endif
+        }
+
+        private string VideoReviewMessage(VideoReviewState state)
+        {
+            switch (state)
+            {
+                case VideoReviewState.Preparing:
+                    return videoRecorder != null && videoRecorder.IsEncoding
+                        ? "Encoding video in the background…"
+                        : "Recording the seconds after the incident…";
+                case VideoReviewState.PreviewUnavailable:
+                    if (!CanPreviewVideo(videoCapture.Extension, IsWebGlPlayer()))
+                        return videoCapture.Extension.TrimStart('.').ToUpperInvariant() + " preview is unavailable in this build.\nThe video can still be included in the report.";
+                    return "Video preview failed.\nThe video can still be included in the report.\n" + videoPreviewError;
+                case VideoReviewState.Unavailable:
+                    return videoCaptureRequested
+                        ? "No video was recorded.\nYou can still send the screenshot and diagnostics."
+                        : "Video recording was disabled when this report opened.";
+                default:
+                    return PreviewIsPrepared()
+                        ? string.Empty
+                        : "Preparing video preview…";
+            }
+        }
+
+        private Texture PreviewTexture()
+        {
+            if (managedAviPreview != null && managedAviPreview.IsPrepared)
+                return managedAviPreview.Texture;
+            return videoPlayer != null && videoPlayer.isPrepared ? videoPlayer.texture : null;
+        }
+
+        private bool PreviewIsPrepared()
+        {
+            return managedAviPreview != null ? managedAviPreview.IsPrepared : videoPlayer != null && videoPlayer.isPrepared;
+        }
+
+        private bool PreviewIsPlaying()
+        {
+            return managedAviPreview != null ? managedAviPreview.IsPlaying : videoPlayer != null && videoPlayer.isPlaying;
+        }
+
+        private bool PreviewCanSetTime()
+        {
+            return managedAviPreview != null ? managedAviPreview.IsPrepared : videoPlayer != null && videoPlayer.canSetTime;
+        }
+
+        private double PreviewDuration()
+        {
+            if (managedAviPreview != null)
+                return managedAviPreview.Duration;
+            return videoPlayer != null && videoPlayer.length > 0d ? videoPlayer.length : videoCapture.DurationSeconds;
+        }
+
+        private double PreviewTime()
+        {
+            return managedAviPreview != null ? managedAviPreview.Time : videoPlayer != null ? videoPlayer.time : 0d;
+        }
+
+        private void SetPreviewTime(double time)
+        {
+            if (managedAviPreview != null)
+            {
+                if (!managedAviPreview.Seek(time))
+                    SetVideoPreviewError(managedAviPreview.Error);
+                return;
+            }
+            if (videoPlayer != null)
+                videoPlayer.time = time;
+        }
+
+        private static string VideoReviewStatusLabel(VideoReviewState state)
+        {
+            switch (state)
+            {
+                case VideoReviewState.Preparing: return "PREPARING";
+                case VideoReviewState.Ready: return "READY";
+                case VideoReviewState.PreviewUnavailable: return "PREVIEW UNAVAILABLE";
+                default: return "UNAVAILABLE";
+            }
+        }
+
+        private static string FormatVideoTime(double seconds)
+        {
+            seconds = Math.Max(0d, seconds);
+            return Math.Floor(seconds / 60d).ToString("0") + ":" + Math.Floor(seconds % 60d).ToString("00");
+        }
+
+        private void DrawAnnotationToolbar(bool canInteract, float availableWidth)
+        {
+            var stacked = ShouldStackAnnotationToolbar(availableWidth, styleScale);
+            if (stacked)
             {
                 GUILayout.Label("DRAW ON THE SCREENSHOT", labelStyle);
                 GUILayout.Space(6 * styleScale);
             }
-            if (compact)
+            if (stacked)
             {
                 GUILayout.BeginHorizontal();
                 DrawAnnotationButton("UNDO", canInteract && screenshotAnnotator.CanUndo, () => screenshotAnnotator.Undo());
@@ -642,28 +1726,33 @@ namespace MacacaGames.RuntimeBugReporter
             }
             GUILayout.Space(8 * styleScale);
 
-            if (compact)
+            if (stacked)
             {
-                annotationColorIndex = GUILayout.SelectionGrid(annotationColorIndex, AnnotationColorLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
+                annotationColorIndex = SoftwareCursorSelectionGrid(annotationColorIndex, AnnotationColorLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
                 GUILayout.Space(8 * styleScale);
-                annotationSizeIndex = GUILayout.SelectionGrid(annotationSizeIndex, AnnotationSizeLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
+                annotationSizeIndex = SoftwareCursorSelectionGrid(annotationSizeIndex, AnnotationSizeLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
             }
             else
             {
                 GUILayout.BeginHorizontal();
-                annotationColorIndex = GUILayout.SelectionGrid(annotationColorIndex, AnnotationColorLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
+                annotationColorIndex = SoftwareCursorSelectionGrid(annotationColorIndex, AnnotationColorLabels, 3, categoryStyle, GUILayout.Height(44 * styleScale));
                 GUILayout.Space(10 * styleScale);
-                annotationSizeIndex = GUILayout.SelectionGrid(annotationSizeIndex, AnnotationSizeLabels, 3, categoryStyle, GUILayout.Width(210 * styleScale), GUILayout.Height(44 * styleScale));
+                annotationSizeIndex = SoftwareCursorSelectionGrid(annotationSizeIndex, AnnotationSizeLabels, 3, categoryStyle, GUILayout.Width(210 * styleScale), GUILayout.Height(44 * styleScale));
                 GUILayout.EndHorizontal();
             }
+        }
+
+        internal static bool ShouldStackAnnotationToolbar(float availableWidth, float scale)
+        {
+            return availableWidth < HorizontalAnnotationToolbarMinimumWidth * Mathf.Max(0.1f, scale);
         }
 
         private void DrawAnnotationButton(string label, bool enabled, Action action, float width = -1f)
         {
             GUI.enabled = enabled;
             var clicked = width > 0f
-                ? GUILayout.Button(label, buttonStyle, GUILayout.Width(width), GUILayout.Height(44 * styleScale))
-                : GUILayout.Button(label, buttonStyle, GUILayout.ExpandWidth(true), GUILayout.Height(44 * styleScale));
+                ? SoftwareCursorButton(label, buttonStyle, GUILayout.Width(width), GUILayout.Height(44 * styleScale))
+                : SoftwareCursorButton(label, buttonStyle, GUILayout.ExpandWidth(true), GUILayout.Height(44 * styleScale));
             if (clicked)
                 action();
             GUI.enabled = true;
@@ -673,6 +1762,30 @@ namespace MacacaGames.RuntimeBugReporter
         {
             var current = Event.current;
             var controlId = GUIUtility.GetControlID("MacacaBeaconScreenshotAnnotation".GetHashCode(), FocusType.Passive, imageRect);
+            if (IsSoftwareCursorActive())
+            {
+                var screenRect = new Rect(GUIUtility.GUIToScreenPoint(imageRect.position), imageRect.size);
+                if ((softwareCursorButtonState & SoftwareCursorButtonState.Pressed) != 0
+                    && softwareCursorPressedControl == 0
+                    && screenRect.Contains(softwareCursorPosition))
+                {
+                    softwareCursorPressedControl = controlId;
+                    screenshotAnnotator.BeginStroke(ToNormalizedPoint(screenRect, softwareCursorPosition), SelectedAnnotationColor(), SelectedBrushRadius());
+                }
+                else if (softwareCursorPressedControl == controlId
+                    && (softwareCursorButtonState & SoftwareCursorButtonState.Held) != 0)
+                {
+                    screenshotAnnotator.AddPoint(ToNormalizedPoint(screenRect, softwareCursorPosition));
+                }
+                if (softwareCursorPressedControl == controlId
+                    && (softwareCursorButtonState & SoftwareCursorButtonState.Released) != 0)
+                {
+                    screenshotAnnotator.AddPoint(ToNormalizedPoint(screenRect, softwareCursorPosition));
+                    screenshotAnnotator.EndStroke();
+                }
+                return;
+            }
+
             if (current.type == EventType.MouseDown && current.button == 0 && imageRect.Contains(current.mousePosition))
             {
                 GUIUtility.hotControl = controlId;
@@ -725,23 +1838,37 @@ namespace MacacaGames.RuntimeBugReporter
             return new Rect(bounds.x + (bounds.width - width) * 0.5f, bounds.y + (bounds.height - height) * 0.5f, width, height);
         }
 
-        private void DrawCaptureSummary()
+        private void DrawAttachments()
         {
-            DrawLabel("REPORT CONTENTS");
-            var screenshotState = settings.includeScreenshot && screenshotBytes != null
-                ? screenshotAnnotator != null && screenshotAnnotator.HasAnnotations ? "[READY] Screenshot + annotations" : "[READY] Screenshot"
-                : "[OFF] Screenshot";
-            var videoState = !settings.enableRollingVideo
-                ? "[OFF] Video"
-                : videoRecorder.IsEncoding
-                    ? "[WAIT] Video encoding in background"
-                    : videoRecorder.IsFinalizing
-                        ? "[WAIT] Video recording"
-                        : videoCapture != null
-                            ? "[READY] " + videoCapture.Extension.TrimStart('.').ToUpperInvariant() + " video"
-                            : "[OFF] Video unavailable";
-            var logState = settings.includeRecentLogs ? "[READY] Recent logs" : "[OFF] Recent logs";
-            GUILayout.Label(screenshotState + "\n" + videoState + "\n" + logState, hintStyle);
+            DrawLabel("Attachments");
+            var optionHeight = (IsMobileLayout() ? 56f : 50f) * styleScale;
+            GUILayout.BeginHorizontal();
+
+            var canIncludeScreenshot = DefaultScreenshotInclusion(screenshotBytes);
+            if (!canIncludeScreenshot)
+                includeScreenshotInReport = false;
+            GUI.enabled = canIncludeScreenshot && !isSending;
+            includeScreenshotInReport = SoftwareCursorToggle(
+                includeScreenshotInReport,
+                "Screenshot",
+                inclusionToggleStyle,
+                GUILayout.Height(optionHeight),
+                GUILayout.ExpandWidth(true));
+            GUI.enabled = true;
+
+            GUILayout.Space(6f * styleScale);
+            var canIncludeVideo = HasVideoCaptureFile(videoCapture);
+            if (!canIncludeVideo)
+                includeVideoInReport = false;
+            GUI.enabled = canIncludeVideo && !isSending;
+            includeVideoInReport = SoftwareCursorToggle(
+                includeVideoInReport,
+                "Video",
+                inclusionToggleStyle,
+                GUILayout.Height(optionHeight),
+                GUILayout.ExpandWidth(true));
+            GUI.enabled = true;
+            GUILayout.EndHorizontal();
         }
 
         private void DrawForm(bool compact)
@@ -750,21 +1877,31 @@ namespace MacacaGames.RuntimeBugReporter
             var categories = SafeCategories();
             var columns = compact && windowRect.width < 560f ? 2 : 3;
             var rows = Mathf.CeilToInt(categories.Length / (float)columns);
-            categoryIndex = GUILayout.SelectionGrid(categoryIndex, categories, columns, categoryStyle, GUILayout.Height(rows * 48f * styleScale));
+            categoryIndex = SoftwareCursorSelectionGrid(categoryIndex, categories, columns, categoryStyle, GUILayout.Height(rows * 48f * styleScale));
+            GUILayout.Space(14 * styleScale);
+
+            DrawAttachments();
             GUILayout.Space(14 * styleScale);
 
             DrawLabel("TITLE  *");
+            RestoreSoftwareCursorTextFocus("BugReportTitle");
             GUI.SetNextControlName("BugReportTitle");
             title = GUILayout.TextField(title, 120, fieldStyle, GUILayout.Height(48 * styleScale));
+            FocusSoftwareCursorControl("BugReportTitle", GUILayoutUtility.GetLastRect());
             GUILayout.Space(12 * styleScale);
 
             DrawLabel("WHAT HAPPENED?  *");
+            RestoreSoftwareCursorTextFocus("BugReportDescription");
             GUI.SetNextControlName("BugReportDescription");
             description = GUILayout.TextArea(description, 2000, areaStyle, GUILayout.MinHeight((compact ? 116 : 150) * styleScale));
+            FocusSoftwareCursorControl("BugReportDescription", GUILayoutUtility.GetLastRect());
             GUILayout.Space(12 * styleScale);
 
             DrawLabel("REPORTER / CONTACT  (OPTIONAL)");
+            RestoreSoftwareCursorTextFocus("BugReportReporter");
+            GUI.SetNextControlName("BugReportReporter");
             reporter = GUILayout.TextField(reporter, 120, fieldStyle, GUILayout.Height(48 * styleScale));
+            FocusSoftwareCursorControl("BugReportReporter", GUILayoutUtility.GetLastRect());
 
             if (!string.IsNullOrEmpty(validationMessage))
             {
@@ -774,7 +1911,7 @@ namespace MacacaGames.RuntimeBugReporter
             if (!string.IsNullOrEmpty(status))
             {
                 GUILayout.Space(10 * styleScale);
-                statusStyle.normal.textColor = statusIsError ? new Color(0.70f, 0.23f, 0.20f) : new Color(0.09f, 0.48f, 0.50f);
+                SetStaticLabelColor(statusStyle, statusIsError ? new Color(0.70f, 0.23f, 0.20f) : new Color(0.09f, 0.48f, 0.50f));
                 GUILayout.Label(status, statusStyle);
             }
         }
@@ -801,6 +1938,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         private IEnumerator RecaptureScreenshot()
         {
+            var includeRecapturedScreenshot = screenshotBytes == null || includeScreenshotInReport;
             isOpening = true;
             statusIsError = false;
             status = "Recapturing screenshot…";
@@ -810,6 +1948,7 @@ namespace MacacaGames.RuntimeBugReporter
             yield return CaptureUtility.CapturePng((bytes, texture) =>
             {
                 screenshotBytes = bytes;
+                includeScreenshotInReport = includeRecapturedScreenshot && DefaultScreenshotInclusion(bytes);
                 if (screenshotPreview != null) Destroy(screenshotPreview);
                 screenshotPreview = texture;
                 screenshotAnnotator = texture == null ? null : new ScreenshotAnnotator(texture);
@@ -826,6 +1965,7 @@ namespace MacacaGames.RuntimeBugReporter
             isSending = true;
             statusIsError = false;
             status = "Sending report…";
+            ResetVideoPreview();
             var report = BuildReport();
             string localArchivePath = null;
             string localArchiveError = null;
@@ -881,14 +2021,14 @@ namespace MacacaGames.RuntimeBugReporter
             report.Fields["OS"] = SystemInfo.operatingSystem;
             report.Fields["GPU"] = SystemInfo.graphicsDeviceName;
 
-            if (settings.includeScreenshot && screenshotBytes != null)
+            if (ShouldAttachScreenshot(includeScreenshotInReport, screenshotBytes))
             {
                 var finalScreenshot = screenshotAnnotator != null && screenshotAnnotator.HasAnnotations
                     ? screenshotAnnotator.EncodePng()
                     : screenshotBytes;
                 AddAttachmentIfAllowed(report, new BugReportAttachment("bug-" + report.Id + ".png", "image/png", finalScreenshot, "Game screenshot at report time with optional annotations"));
             }
-            if (videoCapture != null)
+            if (ShouldAttachVideo(includeVideoInReport, videoCapture))
             {
                 var videoAttachment = BugReportAttachment.FromFile(
                     "bug-" + report.Id + videoCapture.Extension,
@@ -944,12 +2084,63 @@ namespace MacacaGames.RuntimeBugReporter
                 builder.AppendLine("Resolution: " + Screen.width + "x" + Screen.height + " @ " + Screen.currentResolution.refreshRateRatio.value.ToString("0.##") + " Hz");
                 builder.AppendLine("Scene: " + UnityEngine.SceneManagement.SceneManager.GetActiveScene().name);
             }
+            var videoDiagnostics = BuildVideoDiagnosticsText(
+                videoRecorder?.BuildDiagnostics(),
+                Screen.width,
+                Screen.height,
+                settings.videoWidth,
+                videoCapture,
+                videoPreviewDiagnosticError);
+            if (!string.IsNullOrEmpty(videoDiagnostics))
+            {
+                builder.AppendLine();
+                builder.Append(videoDiagnostics);
+            }
             if (settings.includeRecentLogs)
             {
                 builder.AppendLine();
                 builder.AppendLine("Recent logs");
                 builder.AppendLine("-----------");
                 builder.Append(logs.BuildText());
+            }
+            return builder.ToString();
+        }
+
+        internal static string BuildVideoDiagnosticsText(
+            string timeline,
+            int screenWidth,
+            int screenHeight,
+            int configuredVideoWidth,
+            VideoCaptureResult capture,
+            string previewError)
+        {
+            if (string.IsNullOrEmpty(timeline) && capture == null && string.IsNullOrEmpty(previewError))
+                return string.Empty;
+
+            var builder = new StringBuilder();
+            builder.AppendLine("Video recording");
+            builder.AppendLine("---------------");
+            builder.AppendLine("Screen: " + screenWidth + "x" + screenHeight);
+            builder.AppendLine("Configured Video Width: " + configuredVideoWidth + " px");
+            if (capture != null)
+            {
+                builder.AppendLine("Encoder: " + capture.EncoderName);
+                if (capture.Width > 0 && capture.Height > 0)
+                {
+                    builder.AppendLine("Output: " + capture.Width + "x" + capture.Height);
+                    builder.AppendLine("Scaling: " + screenWidth + "x" + screenHeight + " -> " + capture.Width + "x" + capture.Height);
+                }
+                builder.AppendLine("Frames: " + capture.FrameCount);
+                builder.AppendLine("Duration: " + capture.DurationSeconds.ToString("0.00", CultureInfo.InvariantCulture) + " s");
+                if (capture.DurationSeconds > 0d)
+                    builder.AppendLine("Effective FPS: " + (capture.FrameCount / capture.DurationSeconds).ToString("0.00", CultureInfo.InvariantCulture));
+            }
+            if (!string.IsNullOrEmpty(previewError))
+                builder.AppendLine("Preview error: " + previewError);
+            if (!string.IsNullOrEmpty(timeline))
+            {
+                builder.AppendLine("Critical timeline:");
+                builder.Append(timeline);
             }
             return builder.ToString();
         }
@@ -1024,6 +2215,7 @@ namespace MacacaGames.RuntimeBugReporter
             windowTexture = window;
             accentTexture = accent;
             fieldTexture = preview;
+            softwareCursorTexture = MakeSoftwareCursorTexture();
 
             titleStyle = new GUIStyle(GUI.skin.label)
             {
@@ -1032,7 +2224,7 @@ namespace MacacaGames.RuntimeBugReporter
                 alignment = TextAnchor.MiddleLeft,
                 margin = new RectOffset(0, 0, 0, 0)
             };
-            titleStyle.normal.textColor = new Color(0.247f, 0.227f, 0.196f);
+            SetStaticLabelColor(titleStyle, new Color(0.247f, 0.227f, 0.196f));
 
             subtitleStyle = new GUIStyle(GUI.skin.label)
             {
@@ -1040,7 +2232,7 @@ namespace MacacaGames.RuntimeBugReporter
                 alignment = TextAnchor.MiddleLeft,
                 margin = new RectOffset(0, 0, 2, 0)
             };
-            subtitleStyle.normal.textColor = new Color(0.42f, 0.39f, 0.34f);
+            SetStaticLabelColor(subtitleStyle, new Color(0.42f, 0.39f, 0.34f));
 
             labelStyle = new GUIStyle(GUI.skin.label)
             {
@@ -1048,7 +2240,7 @@ namespace MacacaGames.RuntimeBugReporter
                 fontStyle = FontStyle.Bold,
                 margin = new RectOffset(0, 0, Mathf.RoundToInt(3 * scale), Mathf.RoundToInt(7 * scale))
             };
-            labelStyle.normal.textColor = new Color(0.31f, 0.29f, 0.25f);
+            SetStaticLabelColor(labelStyle, new Color(0.31f, 0.29f, 0.25f));
 
             hintStyle = new GUIStyle(GUI.skin.label)
             {
@@ -1056,7 +2248,7 @@ namespace MacacaGames.RuntimeBugReporter
                 wordWrap = true,
                 alignment = TextAnchor.MiddleLeft
             };
-            hintStyle.normal.textColor = new Color(0.43f, 0.40f, 0.35f);
+            SetStaticLabelColor(hintStyle, new Color(0.43f, 0.40f, 0.35f));
 
             cardStyle = new GUIStyle(GUI.skin.box)
             {
@@ -1091,40 +2283,87 @@ namespace MacacaGames.RuntimeBugReporter
             closeButtonStyle = new GUIStyle(buttonStyle) { fontSize = Mathf.RoundToInt(14 * scale) };
 
             statusStyle = new GUIStyle(hintStyle) { fontStyle = FontStyle.Bold };
-            statusStyle.normal.textColor = new Color(0.09f, 0.48f, 0.50f);
+            SetStaticLabelColor(statusStyle, new Color(0.09f, 0.48f, 0.50f));
             validationStyle = new GUIStyle(hintStyle) { fontStyle = FontStyle.Bold };
-            validationStyle.normal.textColor = new Color(0.70f, 0.23f, 0.20f);
+            SetStaticLabelColor(validationStyle, new Color(0.70f, 0.23f, 0.20f));
+            previewMessageStyle = new GUIStyle(hintStyle)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                padding = new RectOffset(Mathf.RoundToInt(20 * scale), Mathf.RoundToInt(20 * scale), 0, 0)
+            };
+            SetStaticLabelColor(previewMessageStyle, new Color(0.88f, 0.90f, 0.93f));
 
-            mobileEntryStyle = CreateButtonStyle(scale, accent, accentHover, accentActive, new Color(0.17f, 0.15f, 0.13f));
-            mobileEntryStyle.fontSize = Mathf.RoundToInt(24 * scale);
-            mobileEntryStyle.margin = new RectOffset(0, 0, 0, 0);
-            mobileEntryStyle.padding = new RectOffset(0, 0, 0, 0);
+            inclusionToggleStyle = new GUIStyle(categoryStyle)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                fontSize = Mathf.RoundToInt(15 * scale),
+                padding = new RectOffset(Mathf.RoundToInt(16 * scale), Mathf.RoundToInt(16 * scale), 0, 0),
+                margin = new RectOffset(0, 0, 2, 2)
+            };
+            inclusionToggleStyle.focused.background = secondaryHover;
+            inclusionToggleStyle.onFocused.background = selectedHover;
+
+            entryButtonStyle = CreateButtonStyle(scale, accent, accentHover, accentActive, new Color(0.17f, 0.15f, 0.13f));
+            entryButtonStyle.fontSize = Mathf.RoundToInt((UsesMobileEntryLayout() ? 24 : 18) * scale);
+            entryButtonStyle.margin = new RectOffset(0, 0, 0, 0);
+            entryButtonStyle.padding = new RectOffset(0, 0, 0, 0);
+
+            entryShortcutStyle = new GUIStyle(entryButtonStyle)
+            {
+                fontSize = Mathf.RoundToInt(13 * scale)
+            };
+            entryShortcutStyle.normal.background = secondary;
+            entryShortcutStyle.hover.background = secondary;
+            entryShortcutStyle.active.background = secondary;
+            entryShortcutStyle.focused.background = secondary;
+            entryShortcutStyle.normal.textColor = ink;
+            entryShortcutStyle.hover.textColor = ink;
+            entryShortcutStyle.active.textColor = ink;
+            entryShortcutStyle.focused.textColor = ink;
         }
 
+        private static bool UsesMobileEntryLayout()
+        {
 #if UNITY_IOS || UNITY_ANDROID
-        private void DrawMobileEntry()
+            return true;
+#else
+            return UsesTouchEntryPresentation(Application.isMobilePlatform, BugReporter.HandheldModeEnabled);
+#endif
+        }
+
+        internal static bool UsesTouchEntryPresentation(bool isMobilePlatform, bool handheldModeEnabled)
+        {
+            return isMobilePlatform || handheldModeEnabled;
+        }
+
+        private void DrawEntryButton()
         {
             EnsureStyles(Mathf.Clamp(Mathf.Min(Screen.width / 1280f, Screen.height / 900f), 0.9f, 1.25f) * settings.interfaceScale);
-            var safeArea = Screen.safeArea;
-            var size = Mathf.Clamp(settings.mobileEntrySize * styleScale, 48f, 112f);
+            var mobile = UsesMobileEntryLayout();
+            var baseSize = SelectEntryButtonBaseSize(mobile, settings.desktopEntryButtonSize, settings.mobileEntryButtonSize);
+            var size = Mathf.Clamp(baseSize * styleScale, mobile ? 48f : 32f, mobile ? 112f : 80f);
             var margin = Mathf.Max(10f, 14f * styleScale);
-            var x = settings.mobileEntryCorner == MobileEntryCorner.TopLeft || settings.mobileEntryCorner == MobileEntryCorner.BottomLeft
-                ? safeArea.xMin + margin
-                : safeArea.xMax - size - margin;
-            var y = settings.mobileEntryCorner == MobileEntryCorner.TopLeft || settings.mobileEntryCorner == MobileEntryCorner.TopRight
-                ? safeArea.yMin + margin
-                : safeArea.yMax - size - margin;
-            var rect = new Rect(x, y, size, size);
+            var safeArea = ToGuiSafeArea(Screen.safeArea, Screen.height);
+            var rect = GetEntryButtonRect(safeArea, size, margin, settings.entryButtonCorner);
 
-            GUI.color = new Color(1f, 1f, 1f, settings.mobileEntryOpacity);
-            if (GUI.Button(rect, "!", mobileEntryStyle))
+            var previousColor = GUI.color;
+            GUI.color = new Color(1f, 1f, 1f, settings.entryButtonOpacity);
+            if (!mobile)
+            {
+                var shortcut = settings.shortcut.ToString();
+                var gap = 6f * styleScale;
+                var desiredWidth = Mathf.Max(size, entryShortcutStyle.CalcSize(new GUIContent(shortcut)).x + 16f * styleScale);
+                var width = Mathf.Min(desiredWidth, Mathf.Max(0f, safeArea.width - margin * 2f - size - gap));
+                if (width > 0f)
+                    GUI.Label(GetEntryShortcutRect(rect, width, gap, settings.entryButtonCorner), shortcut, entryShortcutStyle);
+            }
+            if (GUI.Button(rect, "!", entryButtonStyle))
             {
                 RequestOpen();
                 Event.current.Use();
             }
-            GUI.color = Color.white;
+            GUI.color = previousColor;
         }
-#endif
 
         private GUIStyle CreateButtonStyle(float scale, Texture2D normal, Texture2D hover, Texture2D active, Color text)
         {
@@ -1144,6 +2383,13 @@ namespace MacacaGames.RuntimeBugReporter
             return style;
         }
 
+        private static void SetStaticLabelColor(GUIStyle style, Color color)
+        {
+            style.normal.textColor = color;
+            style.hover.textColor = color;
+            style.hover.background = style.normal.background;
+        }
+
         private Texture2D MakeTexture(Color color)
         {
             var texture = new Texture2D(1, 1, TextureFormat.RGBA32, false)
@@ -1158,6 +2404,47 @@ namespace MacacaGames.RuntimeBugReporter
             return texture;
         }
 
+        private Texture2D MakeSoftwareCursorTexture()
+        {
+            var rows = new[]
+            {
+                "X...........",
+                "XX..........",
+                "XOX.........",
+                "XOOX........",
+                "XOOOX.......",
+                "XOOOOX......",
+                "XOOOOOX.....",
+                "XOOOOOOX....",
+                "XOOOOOOOX...",
+                "XOOOOXXXXX..",
+                "XOOXOX......",
+                "XOX.OX......",
+                "XX..OX......",
+                "X....OX.....",
+                ".....OX.....",
+                "......X....."
+            };
+            var texture = new Texture2D(rows[0].Length, rows.Length, TextureFormat.RGBA32, false)
+            {
+                hideFlags = HideFlags.HideAndDontSave,
+                filterMode = FilterMode.Point,
+                wrapMode = TextureWrapMode.Clamp
+            };
+            for (var y = 0; y < rows.Length; y++)
+            {
+                for (var x = 0; x < rows[y].Length; x++)
+                {
+                    var pixel = rows[y][x];
+                    texture.SetPixel(x, rows.Length - 1 - y,
+                        pixel == 'X' ? new Color(0.08f, 0.07f, 0.06f, 1f) : pixel == 'O' ? Color.white : Color.clear);
+                }
+            }
+            texture.Apply(false, true);
+            styleTextures.Add(texture);
+            return texture;
+        }
+
         private void ReleaseStyleTextures()
         {
             foreach (var texture in styleTextures)
@@ -1166,6 +2453,7 @@ namespace MacacaGames.RuntimeBugReporter
                     Destroy(texture);
             }
             styleTextures.Clear();
+            softwareCursorTexture = null;
             titleStyle = null;
         }
     }

@@ -18,6 +18,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         private readonly MonoBehaviour host;
         private readonly BugReporterSettings settings;
+        private Action<string, Action<VideoCaptureResult>> recoveryRequested;
         private readonly List<Segment> segments = new List<Segment>();
         private GpuFrameCapture capture;
         private Coroutine coroutine;
@@ -37,10 +38,14 @@ namespace MacacaGames.RuntimeBugReporter
         public bool IsEncoding { get; private set; }
         public bool IsEnabled => requestedEnabled;
 
-        public WindowsGpuRollingVideoRecorder(MonoBehaviour host, BugReporterSettings settings)
+        public WindowsGpuRollingVideoRecorder(
+            MonoBehaviour host,
+            BugReporterSettings settings,
+            Action<string, Action<VideoCaptureResult>> recoveryRequested)
         {
             this.host = host;
             this.settings = settings;
+            this.recoveryRequested = recoveryRequested;
         }
 
         public void Start()
@@ -104,29 +109,27 @@ namespace MacacaGames.RuntimeBugReporter
                 {
                     width = frame.Width;
                     height = frame.Height;
-                    if (!BeginSegment(now, frame))
+                    if (!BeginSegment(now, frame, out var createError))
                     {
-                        Debug.LogWarning("[Macaca Beacon] Windows GPU video session creation failed: " + WindowsGpuVideoBridge.GetLastError(session));
-                        AbortRecording(null);
+                        RecoverWithGeneric("Session creation failed: " + createError);
                         yield break;
                     }
                 }
 
                 if (!WindowsGpuVideoBridge.Submit(session, frame, now - segmentStart))
                 {
-                    Debug.LogWarning("[Macaca Beacon] Windows GPU video frame submission failed: " + WindowsGpuVideoBridge.GetLastError(session));
-                    FinishSegment(now);
-                    requestedEnabled = false;
-                    if (incidentPending)
-                        yield return FinalizeIncident();
-                    else
-                        AbortRecording(null);
+                    RecoverWithGeneric("Frame submission failed: " +
+                                       (WindowsGpuVideoBridge.GetLastError(session) ?? "unknown native error"));
                     yield break;
                 }
 
                 if (now - segmentStart >= 2d)
                 {
-                    FinishSegment(now);
+                    if (!FinishSegment(now, out var segmentError))
+                    {
+                        RecoverWithGeneric("Segment finalization failed: " + segmentError);
+                        yield break;
+                    }
                     PruneSegments(now - Math.Max(1, settings.secondsBefore) - 2d);
                 }
 
@@ -135,7 +138,7 @@ namespace MacacaGames.RuntimeBugReporter
             }
         }
 
-        private bool BeginSegment(double start, GpuFrameCapture.GpuFrame frame)
+        private bool BeginSegment(double start, GpuFrameCapture.GpuFrame frame, out string error)
         {
             if (string.IsNullOrEmpty(directory))
             {
@@ -145,32 +148,36 @@ namespace MacacaGames.RuntimeBugReporter
 
             segmentStart = start;
             sessionPath = Path.Combine(directory, "segment-" + Guid.NewGuid().ToString("N") + ".mp4");
-            session = WindowsGpuVideoBridge.CreateSession(sessionPath, frame,
-                settings.videoFramesPerSecond, settings.videoBitrateKbps);
-            return session != IntPtr.Zero;
+            return WindowsGpuVideoBridge.TryCreateSession(
+                sessionPath,
+                frame,
+                settings.videoFramesPerSecond,
+                settings.videoBitrateKbps,
+                out session,
+                out error);
         }
 
-        private void FinishSegment(double end)
+        private bool FinishSegment(double end, out string error)
         {
+            error = null;
             if (session == IntPtr.Zero)
-                return;
+                return true;
 
             var currentSession = session;
             var currentPath = sessionPath;
             session = IntPtr.Zero;
             sessionPath = null;
             var finished = WindowsGpuVideoBridge.FinishSession(currentSession);
-            var error = WindowsGpuVideoBridge.GetLastError(currentSession);
+            error = WindowsGpuVideoBridge.GetLastError(currentSession);
             WindowsGpuVideoBridge.DestroySession(currentSession);
             if (finished && File.Exists(currentPath))
             {
                 segments.Add(new Segment { Path = currentPath, Start = segmentStart, End = end });
+                return true;
             }
-            else
-            {
-                Debug.LogWarning("[Macaca Beacon] Windows GPU segment finalization failed: " + (error ?? "unknown error"));
-                TryDelete(currentPath);
-            }
+            TryDelete(currentPath);
+            error = error ?? "The native encoder returned no completed MP4 segment.";
+            return false;
         }
 
         private IEnumerator FinalizeIncident()
@@ -179,7 +186,11 @@ namespace MacacaGames.RuntimeBugReporter
                 yield break;
 
             incidentPending = false;
-            FinishSegment(Time.realtimeSinceStartupAsDouble);
+            if (!FinishSegment(Time.realtimeSinceStartupAsDouble, out var finishError))
+            {
+                RecoverWithGeneric("Incident segment finalization failed: " + finishError);
+                yield break;
+            }
             IsEncoding = true;
 
             var selected = new List<string>();
@@ -206,12 +217,18 @@ namespace MacacaGames.RuntimeBugReporter
                     var duration = Math.Max(1d / Math.Max(1, settings.videoFramesPerSecond), incidentEndTime - startTime);
                     result = new VideoCaptureResult(outputPath, ".mp4", "video/mp4", duration,
                         Math.Max(1, Mathf.RoundToInt((float)(duration * settings.videoFramesPerSecond))),
-                        "Windows D3D11 Media Foundation H.264");
+                        "Windows D3D11 Media Foundation H.264", width, height);
                 }
                 else
-                {
                     TryDelete(outputPath);
-                }
+            }
+
+            if (result == null)
+            {
+                RecoverWithGeneric(selected.Count == 0
+                    ? "No completed GPU video segment covered the incident window."
+                    : "Could not merge the completed GPU video segments.");
+                yield break;
             }
 
             IsFinalizing = false;
@@ -265,27 +282,32 @@ namespace MacacaGames.RuntimeBugReporter
                 host.StopCoroutine(coroutine);
                 coroutine = null;
             }
-            FinishSegment(Time.realtimeSinceStartupAsDouble);
+            FinishSegment(Time.realtimeSinceStartupAsDouble, out _);
             CleanupSegments();
             capture?.Dispose();
             capture = null;
         }
 
-        private void AbortRecording(VideoCaptureResult result)
+        private void RecoverWithGeneric(string error)
         {
             requestedEnabled = false;
             incidentPending = false;
             IsFinalizing = false;
             IsEncoding = false;
             if (session != IntPtr.Zero)
-                FinishSegment(Time.realtimeSinceStartupAsDouble);
-            incidentCompleted?.Invoke(result);
+                FinishSegment(Time.realtimeSinceStartupAsDouble, out _);
+            var pendingIncident = incidentCompleted;
             incidentCompleted = null;
-            if (coroutine != null)
-                coroutine = null;
+            coroutine = null;
             CleanupSegments();
             capture?.Dispose();
             capture = null;
+            var recover = recoveryRequested;
+            recoveryRequested = null;
+            if (recover != null)
+                recover(error, pendingIncident);
+            else
+                pendingIncident?.Invoke(null);
         }
 
         private static void TryDelete(string path)

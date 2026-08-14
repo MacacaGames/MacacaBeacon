@@ -5,6 +5,7 @@
 #include <mferror.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
+#include <mftransform.h>
 #include <shlwapi.h>
 #include <wincodec.h>
 #include <d3d10_1.h>
@@ -82,6 +83,65 @@ namespace
         message += code;
         message += ")";
         return message;
+    }
+
+    std::string ProbeDx11H264Encoders()
+    {
+        const MFT_REGISTER_TYPE_INFO input = { MFMediaType_Video, MFVideoFormat_NV12 };
+        const MFT_REGISTER_TYPE_INFO output = { MFMediaType_Video, MFVideoFormat_H264 };
+        IMFActivate** hardware = nullptr;
+        IMFActivate** software = nullptr;
+        UINT32 hardwareCount = 0;
+        UINT32 softwareCount = 0;
+        UINT32 d3d11AwareCount = 0;
+        UINT32 inspectionFailures = 0;
+        const HRESULT hardwareResult = MFTEnumEx(
+            MFT_CATEGORY_VIDEO_ENCODER,
+            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+            &input, &output, &hardware, &hardwareCount);
+        if (SUCCEEDED(hardwareResult))
+        {
+            for (UINT32 index = 0; index < hardwareCount; ++index)
+            {
+                IMFTransform* transform = nullptr;
+                IMFAttributes* attributes = nullptr;
+                UINT32 d3d11Aware = FALSE;
+                HRESULT result = hardware[index]->ActivateObject(IID_PPV_ARGS(&transform));
+                if (SUCCEEDED(result))
+                    result = transform->GetAttributes(&attributes);
+                if (SUCCEEDED(result))
+                    result = attributes->GetUINT32(MF_SA_D3D11_AWARE, &d3d11Aware);
+                if (SUCCEEDED(result) && d3d11Aware != FALSE)
+                    ++d3d11AwareCount;
+                else if (FAILED(result))
+                    ++inspectionFailures;
+                SafeRelease(attributes);
+                SafeRelease(transform);
+                hardware[index]->ShutdownObject();
+                SafeRelease(hardware[index]);
+            }
+        }
+        CoTaskMemFree(hardware);
+
+        const HRESULT softwareResult = MFTEnumEx(
+            MFT_CATEGORY_VIDEO_ENCODER,
+            MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT |
+                MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+            &input, &output, &software, &softwareCount);
+        if (SUCCEEDED(softwareResult))
+        {
+            for (UINT32 index = 0; index < softwareCount; ++index)
+                SafeRelease(software[index]);
+        }
+        CoTaskMemFree(software);
+
+        char summary[320] = {};
+        sprintf_s(summary,
+            " DX11 H.264 MFT probe: hardware NV12->H.264=%u (D3D11-aware=%u, inspection failures=%u, enum HRESULT=0x%08lX), software=%u (enum HRESULT=0x%08lX).",
+            hardwareCount, d3d11AwareCount, inspectionFailures,
+            static_cast<unsigned long>(hardwareResult), softwareCount,
+            static_cast<unsigned long>(softwareResult));
+        return summary;
     }
 
     struct EncoderSession
@@ -202,47 +262,72 @@ namespace
     bool ConfigureOutput(EncoderSession* session, int bitrate)
     {
         IMFMediaType* outputType = nullptr;
+        const char* failedOperation = "MFCreateMediaType for H.264 output";
         HRESULT result = MFCreateMediaType(&outputType);
-        if (SUCCEEDED(result)) result = outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        if (SUCCEEDED(result)) result = outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
-        if (SUCCEEDED(result)) result = outputType->SetUINT32(MF_MT_AVG_BITRATE, static_cast<UINT32>(bitrate));
-        if (SUCCEEDED(result)) result = outputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        if (SUCCEEDED(result)) result = MFSetAttributeSize(outputType, MF_MT_FRAME_SIZE, session->width, session->height);
-        if (SUCCEEDED(result)) result = MFSetAttributeRatio(outputType, MF_MT_FRAME_RATE, session->framesPerSecond, 1);
-        if (SUCCEEDED(result)) result = MFSetAttributeRatio(outputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-        if (SUCCEEDED(result)) result = session->writer->AddStream(outputType, &session->streamIndex);
+        if (SUCCEEDED(result)) { failedOperation = "Set H.264 output major type"; result = outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video); }
+        if (SUCCEEDED(result)) { failedOperation = "Set H.264 output subtype"; result = outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264); }
+        if (SUCCEEDED(result)) { failedOperation = "Set H.264 output bitrate"; result = outputType->SetUINT32(MF_MT_AVG_BITRATE, static_cast<UINT32>(bitrate)); }
+        if (SUCCEEDED(result)) { failedOperation = "Set H.264 output interlace mode"; result = outputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive); }
+        if (SUCCEEDED(result)) { failedOperation = "Set H.264 output frame size"; result = MFSetAttributeSize(outputType, MF_MT_FRAME_SIZE, session->width, session->height); }
+        if (SUCCEEDED(result)) { failedOperation = "Set H.264 output frame rate"; result = MFSetAttributeRatio(outputType, MF_MT_FRAME_RATE, session->framesPerSecond, 1); }
+        if (SUCCEEDED(result)) { failedOperation = "Set H.264 output pixel aspect ratio"; result = MFSetAttributeRatio(outputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1); }
+        if (SUCCEEDED(result)) { failedOperation = "Add H.264 output stream"; result = session->writer->AddStream(outputType, &session->streamIndex); }
         SafeRelease(outputType);
-        return SUCCEEDED(result) || session->Fail("Could not configure the H.264 output stream", result);
+        return SUCCEEDED(result) || session->Fail(failedOperation, result);
     }
 
-    bool ConfigureInput(EncoderSession* session)
+    bool ConfigureInput(EncoderSession* session, bool probeDx11EncoderOnNegotiationFailure)
     {
         IMFMediaType* inputType = nullptr;
         IMFAttributes* allocatorAttributes = nullptr;
+        const char* failedOperation = "MFCreateMediaType for video input";
         HRESULT result = MFCreateMediaType(&inputType);
-        if (SUCCEEDED(result)) result = inputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        if (SUCCEEDED(result)) result = inputType->SetGUID(MF_MT_SUBTYPE, session->gpuInput ? MFVideoFormat_NV12 : MFVideoFormat_RGB32);
-        if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_DEFAULT_STRIDE, static_cast<UINT32>(session->gpuInput ? session->width : session->width * 4));
-        if (SUCCEEDED(result)) result = MFSetAttributeSize(inputType, MF_MT_FRAME_SIZE, session->width, session->height);
-        if (SUCCEEDED(result)) result = MFSetAttributeRatio(inputType, MF_MT_FRAME_RATE, session->framesPerSecond, 1);
-        if (SUCCEEDED(result)) result = MFSetAttributeRatio(inputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-        if (SUCCEEDED(result)) result = session->writer->SetInputMediaType(session->streamIndex, inputType, nullptr);
+        if (SUCCEEDED(result)) { failedOperation = "Set video input major type"; result = inputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video); }
+        if (SUCCEEDED(result)) { failedOperation = session->gpuInput ? "Set NV12 GPU input subtype" : "Set RGB32 CPU input subtype"; result = inputType->SetGUID(MF_MT_SUBTYPE, session->gpuInput ? MFVideoFormat_NV12 : MFVideoFormat_RGB32); }
+        if (SUCCEEDED(result)) { failedOperation = "Set video input interlace mode"; result = inputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive); }
+        if (SUCCEEDED(result)) { failedOperation = "Set video input stride"; result = inputType->SetUINT32(MF_MT_DEFAULT_STRIDE, static_cast<UINT32>(session->gpuInput ? session->width : session->width * 4)); }
+        if (SUCCEEDED(result)) { failedOperation = "Set video input frame size"; result = MFSetAttributeSize(inputType, MF_MT_FRAME_SIZE, session->width, session->height); }
+        if (SUCCEEDED(result)) { failedOperation = "Set video input frame rate"; result = MFSetAttributeRatio(inputType, MF_MT_FRAME_RATE, session->framesPerSecond, 1); }
+        if (SUCCEEDED(result)) { failedOperation = "Set video input pixel aspect ratio"; result = MFSetAttributeRatio(inputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1); }
+        if (SUCCEEDED(result)) { failedOperation = "Set Sink Writer video input media type"; result = session->writer->SetInputMediaType(session->streamIndex, inputType, nullptr); }
         if (SUCCEEDED(result) && session->gpuInput)
+        {
+            failedOperation = "MFCreateVideoSampleAllocatorEx for DXGI video samples";
             result = MFCreateVideoSampleAllocatorEx(IID_PPV_ARGS(&session->videoSampleAllocator));
+        }
         if (SUCCEEDED(result) && session->gpuInput)
+        {
+            failedOperation = "SetDirectXManager on the DXGI video sample allocator";
             result = session->videoSampleAllocator->SetDirectXManager(session->deviceManager);
+        }
         if (SUCCEEDED(result) && session->gpuInput)
+        {
+            failedOperation = "MFCreateAttributes for the DXGI video sample allocator";
             result = MFCreateAttributes(&allocatorAttributes, 2);
+        }
         if (SUCCEEDED(result) && session->gpuInput)
+        {
+            failedOperation = "Set D3D11 usage for the DXGI video sample allocator";
             result = allocatorAttributes->SetUINT32(MF_SA_D3D11_USAGE, D3D11_USAGE_DEFAULT);
+        }
         if (SUCCEEDED(result) && session->gpuInput)
+        {
+            failedOperation = "Set D3D11 bind flags for the DXGI video sample allocator";
             result = allocatorAttributes->SetUINT32(MF_SA_D3D11_BINDFLAGS, D3D11_BIND_RENDER_TARGET);
+        }
         if (SUCCEEDED(result) && session->gpuInput)
+        {
+            failedOperation = "InitializeSampleAllocatorEx for DXGI video samples";
             result = session->videoSampleAllocator->InitializeSampleAllocatorEx(2, 4, allocatorAttributes, inputType);
+        }
         SafeRelease(allocatorAttributes);
         SafeRelease(inputType);
-        return SUCCEEDED(result) || session->Fail("Could not configure the video input stream", result);
+        if (SUCCEEDED(result))
+            return true;
+        session->Fail(failedOperation, result);
+        if (probeDx11EncoderOnNegotiationFailure && result == E_NOTIMPL)
+            session->lastError += ProbeDx11H264Encoders();
+        return false;
     }
 
     bool DecodeJpeg(EncoderSession* session, const uint8_t* bytes, int byteCount, std::vector<uint8_t>& pixels)
@@ -571,7 +656,8 @@ static EncoderSession* CreateEncoderSession(
     int height,
     int framesPerSecond,
     int bitrate,
-    ID3D11Texture2D* gpuTexture)
+    ID3D11Texture2D* gpuTexture,
+    bool probeDx11EncoderOnNegotiationFailure)
 {
     EncoderSession* session = new (std::nothrow) EncoderSession();
     if (session == nullptr)
@@ -621,24 +707,37 @@ static EncoderSession* CreateEncoderSession(
     DeleteFileW(widePath.c_str());
 
     IMFAttributes* attributes = nullptr;
+    const char* failedOperation = "MFCreateAttributes for the MP4 sink writer";
     result = MFCreateAttributes(&attributes, 4);
-    if (SUCCEEDED(result)) result = attributes->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
-    if (SUCCEEDED(result)) result = attributes->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
+    if (SUCCEEDED(result)) { failedOperation = "Enable Media Foundation hardware transforms"; result = attributes->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE); }
+    if (SUCCEEDED(result)) { failedOperation = "Disable Media Foundation Sink Writer throttling"; result = attributes->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE); }
     if (SUCCEEDED(result) && gpuTexture != nullptr)
     {
         session->gpuInput = true;
         gpuTexture->GetDevice(&session->d3dDevice);
         if (session->d3dDevice == nullptr)
+        {
+            failedOperation = "Get D3D11 device from the Unity capture texture";
             result = E_POINTER;
+        }
         ID3D11DeviceContext* immediateContext = nullptr;
         if (SUCCEEDED(result))
             session->d3dDevice->GetImmediateContext(&immediateContext);
         if (SUCCEEDED(result) && immediateContext == nullptr)
+        {
+            failedOperation = "Get D3D11 immediate context";
             result = E_POINTER;
+        }
         if (SUCCEEDED(result))
+        {
+            failedOperation = "Query ID3D11VideoDevice";
             result = session->d3dDevice->QueryInterface(IID_PPV_ARGS(&session->videoDevice));
+        }
         if (SUCCEEDED(result))
+        {
+            failedOperation = "Query ID3D11VideoContext";
             result = immediateContext->QueryInterface(IID_PPV_ARGS(&session->videoContext));
+        }
         SafeRelease(immediateContext);
 
         D3D11_VIDEO_PROCESSOR_CONTENT_DESC contentDescription = {};
@@ -652,31 +751,50 @@ static EncoderSession* CreateEncoderSession(
         contentDescription.OutputHeight = contentDescription.InputHeight;
         contentDescription.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
         if (SUCCEEDED(result))
+        {
+            failedOperation = "CreateVideoProcessorEnumerator";
             result = session->videoDevice->CreateVideoProcessorEnumerator(
                 &contentDescription, &session->videoEnumerator);
+        }
         if (SUCCEEDED(result))
+        {
+            failedOperation = "CreateVideoProcessor";
             result = session->videoDevice->CreateVideoProcessor(
                 session->videoEnumerator, 0, &session->videoProcessor);
+        }
 
         UINT resetToken = 0;
         if (SUCCEEDED(result))
+        {
+            failedOperation = "MFCreateDXGIDeviceManager";
             result = MFCreateDXGIDeviceManager(&resetToken, &session->deviceManager);
+        }
         if (SUCCEEDED(result))
+        {
+            failedOperation = "ResetDevice on IMFDXGIDeviceManager";
             result = session->deviceManager->ResetDevice(session->d3dDevice, resetToken);
+        }
         if (SUCCEEDED(result))
+        {
+            failedOperation = "Set MF_SINK_WRITER_D3D_MANAGER";
             result = attributes->SetUnknown(MF_SINK_WRITER_D3D_MANAGER, session->deviceManager);
+        }
     }
-    if (SUCCEEDED(result)) result = MFCreateSinkWriterFromURL(widePath.c_str(), nullptr, attributes, &session->writer);
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "MFCreateSinkWriterFromURL for MP4 output";
+        result = MFCreateSinkWriterFromURL(widePath.c_str(), nullptr, attributes, &session->writer);
+    }
     SafeRelease(attributes);
     if (FAILED(result))
     {
-        session->Fail("Could not create the MP4 sink writer", result);
+        session->Fail(failedOperation, result);
         return session;
     }
 
     if (!ConfigureOutput(session, std::max(128000, bitrate)))
         return session;
-    if (!ConfigureInput(session))
+    if (!ConfigureInput(session, probeDx11EncoderOnNegotiationFailure))
         return session;
 
     result = session->writer->BeginWriting();
@@ -848,7 +966,7 @@ static bool InitializeD3D11EncoderWorker(EncoderSession* session)
 
     session->d3d12Delegate = CreateEncoderSession(
         session->outputPathUtf8.c_str(), session->width, session->height,
-        session->framesPerSecond, session->bitrate, session->d3d11CopyTexture);
+        session->framesPerSecond, session->bitrate, session->d3d11CopyTexture, false);
     if (session->d3d12Delegate == nullptr || !session->d3d12Delegate->ready)
     {
         if (session->d3d12Delegate != nullptr && !session->d3d12Delegate->lastError.empty())
@@ -1177,7 +1295,7 @@ extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_Create(
     int framesPerSecond,
     int bitrate)
 {
-    return CreateEncoderSession(outputPath, width, height, framesPerSecond, bitrate, nullptr);
+    return CreateEncoderSession(outputPath, width, height, framesPerSecond, bitrate, nullptr, false);
 }
 
 extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_GpuCreate(
@@ -1189,7 +1307,7 @@ extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_GpuCreat
     void* nativeTexture)
 {
     return CreateEncoderSession(outputPath, width, height, framesPerSecond, bitrate,
-        static_cast<ID3D11Texture2D*>(nativeTexture));
+        static_cast<ID3D11Texture2D*>(nativeTexture), true);
 }
 
 extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_GpuCreateD3D12(
