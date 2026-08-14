@@ -20,9 +20,9 @@
 
 ## Production 隔離
 
-若要在 Production build 中停用 Beacon，於該 build target 的 `Project Settings > Player > Scripting Define Symbols` 加入：
+若要在 Production build 中停用 Beacon，於該 build target 的 `Project Settings > Player > Scripting Define Symbols` 加入以下任一個 define：
 
-`MACACA_BEACON_PRODUCTION`
+`MACACA_BEACON_PRODUCTION` 或 `PRODUCTION`
 
 這會在編譯期將設定欄位替換為停用的 shell，並停用自動啟動、`BugReporter.Open()` 與影片錄製切換；不需要額外 CI 設定。未加入此 define 時，Editor、Development 與一般測試 build 維持完整 Beacon 行為。
 

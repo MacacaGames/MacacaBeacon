@@ -15,7 +15,7 @@ namespace MacacaGames.RuntimeBugReporter
     {
         public const string ResourceName = "BugReporterSettings";
 
-#if MACACA_BEACON_PRODUCTION
+#if MACACA_BEACON_PRODUCTION || PRODUCTION
         // Keep the asset type and runtime API available in Production, but do
         // not compile or serialize any project-specific Beacon configuration.
         // These properties are intentionally non-serialized shell values.
@@ -121,7 +121,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         public static BugReporterSettings LoadOrDefault()
         {
-#if MACACA_BEACON_PRODUCTION
+#if MACACA_BEACON_PRODUCTION || PRODUCTION
             return null;
 #else
             var configured = Resources.Load<BugReporterSettings>(ResourceName);

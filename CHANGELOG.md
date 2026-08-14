@@ -3,6 +3,7 @@
 ## 0.5.1
 
 - Added compile-time Production isolation with the `MACACA_BEACON_PRODUCTION` define.
+- Also accepts the conventional `PRODUCTION` define as an equivalent switch.
 - Production builds retain a disabled `BugReporterSettings` shell without compiling project-specific configuration fields.
 - Disabled automatic startup, manual opening, and rolling-video toggling in Production builds.
 

@@ -19,7 +19,7 @@ namespace MacacaGames.RuntimeBugReporter
         {
             get
             {
-#if MACACA_BEACON_PRODUCTION
+#if MACACA_BEACON_PRODUCTION || PRODUCTION
                 return false;
 #else
                 if (BugReporterController.Instance != null)
@@ -31,7 +31,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         public static void Open()
         {
-#if MACACA_BEACON_PRODUCTION
+#if MACACA_BEACON_PRODUCTION || PRODUCTION
             return;
 #else
             EnsureController();
@@ -51,7 +51,7 @@ namespace MacacaGames.RuntimeBugReporter
         /// </summary>
         public static void SetVideoRecordingEnabled(bool enabled)
         {
-#if MACACA_BEACON_PRODUCTION
+#if MACACA_BEACON_PRODUCTION || PRODUCTION
             return;
 #else
             EnsureController();
@@ -87,7 +87,7 @@ namespace MacacaGames.RuntimeBugReporter
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void AutoBootstrap()
         {
-#if MACACA_BEACON_PRODUCTION
+#if MACACA_BEACON_PRODUCTION || PRODUCTION
             return;
 #else
             var settings = BugReporterSettings.LoadOrDefault();
