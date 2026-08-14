@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.5.4 - 2026-08-15
+
+- Fixed the native Windows DX11 Beacon hang by isolating Unity's D3D11 capture context from the Media Foundation encoder context with a same-adapter shared keyed-mutex texture and dedicated encoder worker.
+- Kept the Windows GPU path on GPU resources without `AsyncGPUReadback`; forced `windows-gpu` mode now stops recording on native initialization or recording failure instead of switching to the generic MP4/AVI compatibility recorder.
+- Rebuilt the Windows x64 native plugin and validated 45-frame H.264 MP4 smoke tests on both Direct3D11 and Direct3D12.
+- Documented the Windows GPU backend, smoke-test command, and native DLL rebuild workflow.
+
 - Added automatic Proton detection for Windows Standalone: Proton uses a bounded persistent NativeArray RGBA ring plus deferred OpenH264 without launch flags, Media Foundation, or D3D shared-texture recording, while native Windows keeps its GPU-first path. Proton readback orientation is preserved without the extra native-Windows vertical flip.
 - Fixed intermittent undersized Beacon screenshots on Gamescope/Proton by capturing the one-shot screenshot from Unity's actual current backbuffer texture instead of allocating a canvas from transient `Screen.width`/`Screen.height` values.
 - Added an in-process deferred OpenH264 software backend and fast-start MP4 muxer for Windows/Proton, built from pinned BSD-licensed OpenH264 2.6.0 source into the existing x64 plugin without a separate process or runtime DLL.

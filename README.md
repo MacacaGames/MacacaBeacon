@@ -73,7 +73,27 @@ Steam 專案可以在自己的 Steamworks 初始化完成後，以 `SteamUtils.I
 
 ## 錄影限制
 
-`Enable Rolling Video` 預設關閉。macOS、iOS、Android 與 Windows 會依平台優先使用 GPU readback/native encoder；WebGL 則刻意使用 CPU JPEG capture，避開瀏覽器的 `AsyncGPUReadback` fence 問題，再交給瀏覽器 WebCodecs 做最後的 H.264 編碼。事件完成編碼或 runtime 關閉錄影後，rolling frame cache 會自動清除。
+`Enable Rolling Video` 預設關閉。macOS、iOS、Android 與 Windows 會依平台優先使用原生 GPU／硬體 encoder；WebGL 則刻意使用 CPU JPEG capture，避開瀏覽器的 `AsyncGPUReadback` fence 問題，再交給瀏覽器 WebCodecs 做最後的 H.264 編碼。事件完成編碼或 runtime 關閉錄影後，rolling frame cache 會自動清除。
+
+### Windows GPU 錄影（DX11／DX12）
+
+原生 Windows 使用 Media Foundation H.264 MP4。DX12 使用 Unity D3D12 resource interop；DX11 則將 Unity 的 D3D11 texture 複製到同一個 adapter 上的 shared keyed-mutex texture，再交給獨立的 D3D11 encoder device/context 執行 Media Foundation 與 H.264 編碼。Unity render thread 只提交 GPU copy，不執行 GPU → CPU readback，也不會讓 Media Foundation 直接使用 Unity 的 immediate context。
+
+若要在 Windows Editor 中強制只使用這條原生 GPU 路徑，加入：
+
+```properties
+-macaca-beacon-video-backend=windows-gpu
+```
+
+強制 `windows-gpu` 時，GPU 初始化或錄影失敗會停用該次錄影，不會改用 generic MP4／AVI compatibility recorder。未指定 backend 時使用 `auto`；`auto` 才保留既有的相容性恢復行為。Standalone Player 不讀取這個 Editor 診斷參數，原生 Windows 會自動選擇 GPU backend，Proton 則使用獨立的 OpenH264 軟體路徑。
+
+GPU smoke test 可使用一般 Unity Editor 執行：
+
+```properties
+Unity.exe -projectPath ProjectName.Unity -force-d3d11 -macacaWindowsGpuSmoke -executeMethod MacacaGames.RuntimeBugReporter.Editor.WindowsGpuVideoSmoke.Run
+```
+
+將 `-force-d3d11` 改為 `-force-d3d12` 可驗證 DX12 路徑。GPU smoke test 不可搭配 `-nographics`，因為該參數會建立 Null graphics device，而不是 D3D11／D3D12 device。
 
 `Maximum Video Cache Megabytes` 預設為 512 MB。`Video Width` 是錄影輸出寬度，不是螢幕原生寬度；例如 Steam Deck 的 1280×800 畫面在 960 設定下會先擷取完整 backbuffer，再等比例縮成 960×600，以控制 readback、cache、編碼與附件成本，不會取出 960×600 區域造成裁切。Windows／Proton generic recorder 啟動時會依寬高、前後秒數與 FPS 一次配置固定大小的 persistent `NativeArray` ring；若需求超過 cache 上限，會先降低有效 capture FPS，確保整個 incident window 與少量 in-flight slots 永遠落在預留區內。以 960×600、30 FPS、前 5 秒＋後 1 秒計算，raw ring 約使用 422 MiB。rolling 過程不建立每幀 `.rgba` 檔，也不在 managed heap 留下一整段 `byte[]`；只有回報頁面開啟、後段畫面收集完成後才開始編碼並寫出最終 MP4。若 `AsyncGPUReadback` 不可用或 RAM ring 配置失敗，仍保留原本 disk-backed generic fallback。
 
@@ -99,8 +119,8 @@ Beacon 開啟時的單張 PNG 截圖在 Proton 下直接使用 Unity 回傳的�
 |---|---|
 | macOS Editor | H.264 MP4；可選 AVI fallback |
 | macOS Standalone (Intel / Apple Silicon) | H.264 MP4；可選 AVI fallback |
-| Windows Editor (x64) | H.264 MP4；可選 AVI fallback |
-| Windows Standalone (x64) | H.264 MP4；可選 AVI fallback |
+| Windows Editor (x64) | Native D3D11／D3D12 GPU + Media Foundation H.264 MP4；強制 `windows-gpu` 失敗時不 fallback |
+| Windows Standalone (x64) | Native D3D11／D3D12 GPU + Media Foundation H.264 MP4；`auto` 模式保留相容性恢復 |
 | Windows Standalone via Proton | NativeArray RAM ring + deferred in-process OpenH264 MP4；失敗時可退回 managed AVI |
 | iOS device／Simulator | Metal GPU + AVAssetWriter H.264 MP4；GPU 不可用時回退 CPU；可選 AVI fallback |
 | Android device | H.264 MP4（MediaCodec／MediaMuxer）；可選 AVI fallback |
@@ -109,7 +129,7 @@ Beacon 開啟時的單張 PNG 截圖在 Proton 下直接使用 Unity 回傳的�
 
 macOS native source 位於 `Native~/macOS`，執行 `build.sh` 可重建 `Runtime/Plugins/macOS/MacacaBeaconVideo.bundle`。它只連結 Apple 系統 framework，沒有額外第三方 runtime dependency。
 
-Windows native source 位於 `Native~/Windows`。在裝有 Visual Studio 2022「Desktop development with C++」、Windows 10/11 SDK，並將 `OPENH264_ROOT` 指向 OpenH264 2.6.0 headers 與 `openh264.lib` 的 Windows 主機執行 `build.ps1`，即可重建 `Runtime/Plugins/Windows/x86_64/MacacaBeaconVideoWindows.dll`；macOS package 維護者也可安裝 MinGW-w64 後執行 `build-cross.sh`，腳本會抓取並驗證 pinned OpenH264 commit 後從 source 靜態連結。Player 不需額外 `openh264.dll`。OpenH264 的 BSD 授權與 H.264 patent notice 記錄在 `OPENH264-LICENSE.md`；發佈產品前仍應由產品方確認適用地區的專利授權義務。正式支援 Windows 10/11 x64；32-bit Windows、UWP 與 ARM64 目前不在 PluginImporter 支援範圍。
+Windows native source 位於 `Native~/Windows`。在裝有 Visual Studio 2022「Desktop development with C++」、Windows 10/11 SDK，並將 `OPENH264_ROOT` 指向 OpenH264 2.6.0 headers 與 `openh264.lib` 的 Windows 主機執行 `build.ps1`，即可重建 `Runtime/Plugins/Windows/x86_64/MacacaBeaconVideoWindows.dll`；Unity 執行時載入的是這個預編譯 DLL，不是直接載入 C++ 原始碼。macOS package 維護者也可安裝 MinGW-w64 後執行 `build-cross.sh`，腳本會抓取並驗證 pinned OpenH264 commit 後從 source 靜態連結。Player 不需額外 `openh264.dll`。OpenH264 的 BSD 授權與 H.264 patent notice 記錄在 `OPENH264-LICENSE.md`；發佈產品前仍應由產品方確認適用地區的專利授權義務。正式支援 Windows 10/11 x64；32-bit Windows、UWP 與 ARM64 目前不在 PluginImporter 支援範圍。
 
 iOS 使用 `Runtime/Plugins/iOS/MacacaBeaconVideo.mm`，由 Unity 產生 Xcode project 時直接編入，透過 `DllImport("__Internal")` 呼叫 Metal render-event bridge 與 AVAssetWriter。GPU 路徑直接把 Unity Metal texture blit 到 IOSurface-backed CVPixelBuffer，並使用 iOS 硬體 H.264 路徑；PluginImporter 會加入 AVFoundation、CoreGraphics、CoreMedia、CoreVideo、ImageIO、Metal 與 VideoToolbox。不需要在 Scene 放置額外元件。
 
