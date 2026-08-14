@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added automatic Proton detection for Windows Standalone: Proton uses a bounded persistent NativeArray RGBA ring plus deferred OpenH264 without launch flags, Media Foundation, or D3D shared-texture recording, while native Windows keeps its GPU-first path. Proton readback orientation is preserved without the extra native-Windows vertical flip.
+- Fixed intermittent undersized Beacon screenshots on Gamescope/Proton by capturing the one-shot screenshot from Unity's actual current backbuffer texture instead of allocating a canvas from transient `Screen.width`/`Screen.height` values.
+- Added an in-process deferred OpenH264 software backend and fast-start MP4 muxer for Windows/Proton, built from pinned BSD-licensed OpenH264 2.6.0 source into the existing x64 plugin without a separate process or runtime DLL.
 - Changed activation back to build-specific semantics: Editor Play Mode stays enabled, while `Enable In Build` consistently gates automatic and API-driven Player activation.
 - Added an IMGUI software cursor with resolution-consistent apparent size and movement for hidden or locked desktop pointers without changing Unity cursor state, using an optional Input System raw-delta adapter, automatic mobile/handheld/console exclusions, and a Steamworks-independent runtime opt-out for PC handhelds.
 - Added a host-provided Handheld Mode that reuses the touch-oriented Entry Button without its keyboard label and excludes the desktop software cursor, while keeping Steamworks outside the package.

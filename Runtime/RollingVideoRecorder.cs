@@ -6,6 +6,7 @@ using System.IO;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace MacacaGames.RuntimeBugReporter
 {
@@ -14,6 +15,7 @@ namespace MacacaGames.RuntimeBugReporter
         Auto,
         WindowsGpu,
         WindowsCpu,
+        SoftwareMp4,
         ManagedAvi
     }
 
@@ -45,6 +47,9 @@ namespace MacacaGames.RuntimeBugReporter
         private bool isFinalizing;
         private bool isEncoding;
         private string frameCacheDirectory;
+        private NativeVideoFrameRing nativeFrameRing;
+        private int effectiveCaptureFramesPerSecond;
+        private double nextRingExhaustionDiagnosticTime;
         private long historyBytes;
         private bool backendEnvironmentLogged;
         private VideoCaptureResult lastDiagnosticCapture;
@@ -60,13 +65,22 @@ namespace MacacaGames.RuntimeBugReporter
         {
             this.host = host;
             this.settings = settings;
+#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
+            // Player builds choose automatically without launch arguments.
+            // Proton avoids Media Foundation and D3D shared-resource paths;
+            // native Windows keeps the existing GPU-first behavior.
+            windowsVideoBackendMode = WindowsOpenH264Mp4Encoder.IsWine
+                ? WindowsVideoBackendMode.SoftwareMp4
+                : WindowsVideoBackendMode.Auto;
+#else
             var requestedBackend = ParseWindowsVideoBackend(Environment.GetCommandLineArgs(), out var invalidBackend);
             if (!string.IsNullOrEmpty(invalidBackend))
                 RecordDiagnostic("Unknown video backend '" + invalidBackend + "'; using auto.", LogType.Warning);
-#if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
+#if UNITY_EDITOR_WIN
             windowsVideoBackendMode = requestedBackend;
 #else
             windowsVideoBackendMode = WindowsVideoBackendMode.Auto;
+#endif
 #endif
 #if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_IOS
             if (EnableExperimentalMacOsGpuPath && MacOsGpuVideoBridge.IsAvailable)
@@ -79,7 +93,9 @@ namespace MacacaGames.RuntimeBugReporter
 #if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
             if (EnableExperimentalWindowsGpuPath &&
                 windowsVideoBackendMode != WindowsVideoBackendMode.WindowsCpu &&
+                windowsVideoBackendMode != WindowsVideoBackendMode.SoftwareMp4 &&
                 windowsVideoBackendMode != WindowsVideoBackendMode.ManagedAvi &&
+                (windowsVideoBackendMode == WindowsVideoBackendMode.WindowsGpu || !WindowsOpenH264Mp4Encoder.IsWine) &&
                 (windowsVideoBackendMode == WindowsVideoBackendMode.WindowsGpu || WindowsGpuVideoBridge.IsAvailable))
                 windowsGpuRecorder = new WindowsGpuRollingVideoRecorder(host, settings, RecoverFromWindowsGpuFailure);
 #endif
@@ -110,6 +126,7 @@ namespace MacacaGames.RuntimeBugReporter
                     case "auto": return WindowsVideoBackendMode.Auto;
                     case "windows-gpu": return WindowsVideoBackendMode.WindowsGpu;
                     case "windows-cpu": return WindowsVideoBackendMode.WindowsCpu;
+                    case "software-mp4": return WindowsVideoBackendMode.SoftwareMp4;
                     case "managed-avi": return WindowsVideoBackendMode.ManagedAvi;
                     default:
                         invalidValue = value ?? string.Empty;
@@ -128,9 +145,11 @@ namespace MacacaGames.RuntimeBugReporter
             out bool allowCustomEncoder)
         {
             preferMp4 = mode == WindowsVideoBackendMode.WindowsCpu ||
+                        mode == WindowsVideoBackendMode.SoftwareMp4 ||
                         (mode != WindowsVideoBackendMode.ManagedAvi && configuredPreferMp4);
             allowAvi = mode == WindowsVideoBackendMode.ManagedAvi ||
-                       (mode != WindowsVideoBackendMode.WindowsCpu && configuredAllowAvi);
+                       (mode != WindowsVideoBackendMode.WindowsCpu &&
+                        configuredAllowAvi);
             allowCustomEncoder = mode == WindowsVideoBackendMode.Auto;
         }
 
@@ -140,6 +159,7 @@ namespace MacacaGames.RuntimeBugReporter
             {
                 case WindowsVideoBackendMode.WindowsGpu: return "windows-gpu";
                 case WindowsVideoBackendMode.WindowsCpu: return "windows-cpu";
+                case WindowsVideoBackendMode.SoftwareMp4: return "software-mp4";
                 case WindowsVideoBackendMode.ManagedAvi: return "managed-avi";
                 default: return "auto";
             }
@@ -161,6 +181,9 @@ namespace MacacaGames.RuntimeBugReporter
                     ? "windows-gpu"
                     : windowsVideoBackendMode == WindowsVideoBackendMode.WindowsCpu
                         ? "windows-cpu"
+                        : windowsVideoBackendMode == WindowsVideoBackendMode.SoftwareMp4 ||
+                          windowsVideoBackendMode == WindowsVideoBackendMode.Auto && WindowsOpenH264Mp4Encoder.IsWine
+                            ? "software-mp4"
                         : windowsVideoBackendMode == WindowsVideoBackendMode.ManagedAvi
                             ? "managed-avi"
                             : "generic-auto";
@@ -199,6 +222,38 @@ namespace MacacaGames.RuntimeBugReporter
         {
             if (captureCoroutine != null)
                 return;
+            effectiveCaptureFramesPerSecond = Math.Max(1, settings.videoFramesPerSecond);
+#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
+            if (windowsVideoBackendMode != WindowsVideoBackendMode.ManagedAvi &&
+                SystemInfo.supportsAsyncGPUReadback)
+            {
+                CaptureUtility.CalculateScaledSize(
+                    settings.videoWidth,
+                    Screen.width,
+                    Screen.height,
+                    out var width,
+                    out var height);
+                if (NativeVideoFrameRing.TryCreate(
+                        width,
+                        height,
+                        settings.videoFramesPerSecond,
+                        settings.secondsBefore,
+                        settings.secondsAfter,
+                        settings.maximumVideoCacheMegabytes,
+                        out nativeFrameRing,
+                        out var ringDiagnostic))
+                {
+                    effectiveCaptureFramesPerSecond = nativeFrameRing.EffectiveFramesPerSecond;
+                    capturedWidth = width;
+                    capturedHeight = height;
+                    RecordDiagnostic(ringDiagnostic);
+                }
+                else
+                {
+                    RecordDiagnostic(ringDiagnostic + " Falling back to disk-backed frame capture.", LogType.Warning);
+                }
+            }
+#endif
             captureStartedTime = Time.realtimeSinceStartupAsDouble;
             captureCoroutine = host.StartCoroutine(CaptureLoop());
         }
@@ -262,6 +317,7 @@ namespace MacacaGames.RuntimeBugReporter
 
             var incidentTime = Time.realtimeSinceStartupAsDouble;
             incidentFrames = new List<VideoCaptureFrame>(history);
+            RetainNativeFrames(incidentFrames);
             incidentCompleted = diagnosticCompleted;
             incidentClipStartTime = Math.Max(captureStartedTime, incidentTime - settings.secondsBefore);
             incidentEndTime = incidentTime + settings.secondsAfter;
@@ -279,7 +335,7 @@ namespace MacacaGames.RuntimeBugReporter
         private IEnumerator CaptureLoop()
         {
             var waitForFrame = new WaitForEndOfFrame();
-            var interval = 1f / Mathf.Max(1, settings.videoFramesPerSecond);
+            var interval = 1f / Mathf.Max(1, effectiveCaptureFramesPerSecond);
             var nextCapture = 0f;
             while (true)
             {
@@ -311,10 +367,47 @@ namespace MacacaGames.RuntimeBugReporter
                 if (Application.targetFrameRate >= 50 && Time.unscaledDeltaTime > 0.025f)
                     continue;
 
+                TrimHistory(Time.realtimeSinceStartupAsDouble - Mathf.Max(1, settings.secondsBefore));
+
                 byte[] frame = null;
                 var frameWidth = 0;
                 var frameHeight = 0;
                 var frameFormat = VideoCaptureFrameFormat.Rgba32;
+                VideoCaptureFrame capturedFrame;
+#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
+                var nativeSlot = nativeFrameRing?.TryAcquire();
+                if (nativeSlot != null)
+                {
+                    var nativeSucceeded = false;
+                    var rowsAreBottomUp = false;
+                    yield return CaptureUtility.CaptureScaledRgbaIntoNativeArrayAsync(
+                        nativeSlot,
+                        (succeeded, bottomUp) =>
+                        {
+                            nativeSucceeded = succeeded;
+                            rowsAreBottomUp = bottomUp;
+                        });
+                    if (!nativeSucceeded)
+                        continue;
+                    capturedFrame = new VideoCaptureFrame(
+                        nativeSlot,
+                        Time.realtimeSinceStartupAsDouble,
+                        rowsAreBottomUp);
+                    frameWidth = nativeSlot.Width;
+                    frameHeight = nativeSlot.Height;
+                    goto FrameCaptured;
+                }
+                if (nativeFrameRing != null)
+                {
+                    var now = Time.realtimeSinceStartupAsDouble;
+                    if (now >= nextRingExhaustionDiagnosticTime)
+                    {
+                        nextRingExhaustionDiagnosticTime = now + 5d;
+                        RecordDiagnostic("RAM frame ring had no free slot; dropping rolling frames until an encoder/history reference is released.", LogType.Warning);
+                    }
+                    continue;
+                }
+#endif
                 yield return CaptureUtility.CaptureScaledRgbaAsync(settings.videoWidth, (value, width, height) =>
                 {
                     frame = value;
@@ -339,7 +432,6 @@ namespace MacacaGames.RuntimeBugReporter
                 capturedWidth = frameWidth;
                 capturedHeight = frameHeight;
 
-                VideoCaptureFrame capturedFrame;
                 if (frameFormat == VideoCaptureFrameFormat.Rgba32)
                 {
 #if UNITY_WEBGL && !UNITY_EDITOR
@@ -376,6 +468,7 @@ namespace MacacaGames.RuntimeBugReporter
                     capturedFrame = new VideoCaptureFrame(frame, Time.realtimeSinceStartupAsDouble);
                 }
 
+            FrameCaptured:
                 history.Enqueue(capturedFrame);
                 historyBytes += capturedFrame.ByteCount;
                 var historyCutoff = capturedFrame.CapturedAt - Mathf.Max(1, settings.secondsBefore);
@@ -383,18 +476,12 @@ namespace MacacaGames.RuntimeBugReporter
                     ? settings.maximumVideoCacheMegabytes
                     : 512;
                 var maximumCacheBytes = Math.Max(32L, configuredCacheMegabytes) * 1024L * 1024L;
-                while (history.Count > 0 &&
-                       (history.Peek().CapturedAt < historyCutoff || historyBytes > maximumCacheBytes))
-                {
-                    var expired = history.Dequeue();
-                    historyBytes -= expired.ByteCount;
-                    if (!isFinalizing)
-                        expired.DeleteDataFile();
-                }
+                TrimHistory(historyCutoff, maximumCacheBytes);
 
                 if (incidentFrames == null)
                     continue;
 
+                capturedFrame.RetainNative();
                 incidentFrames.Add(capturedFrame);
                 if (capturedFrame.CapturedAt >= incidentEndTime)
                     BeginFinishIncident();
@@ -408,9 +495,26 @@ namespace MacacaGames.RuntimeBugReporter
                 host.StopCoroutine(captureCoroutine);
                 captureCoroutine = null;
             }
-            history.Clear();
-            historyBytes = 0;
+            if (incidentFrames != null)
+            {
+                ReleaseNativeFrames(incidentFrames);
+                incidentFrames = null;
+                incidentCompleted = null;
+                isFinalizing = false;
+            }
+            ReleaseHistory();
             DeleteFrameCache();
+            // A deferred encoder can be reading NativeArray pointers on its
+            // worker thread. FinishIncident owns disposal after those retained
+            // frame references have been released.
+            if (isEncoding)
+                return;
+            if (nativeFrameRing != null)
+            {
+                AsyncGPUReadback.WaitAllRequests();
+                nativeFrameRing.Dispose();
+                nativeFrameRing = null;
+            }
         }
 
         private void BeginFinishIncident()
@@ -427,7 +531,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         private IEnumerator FinishIncident(List<VideoCaptureFrame> frames, Action<VideoCaptureResult> completed)
         {
-            var durationSeconds = Math.Max(1d / Math.Max(1, settings.videoFramesPerSecond), incidentEndTime - incidentClipStartTime);
+            var durationSeconds = Math.Max(1d / Math.Max(1, effectiveCaptureFramesPerSecond), incidentEndTime - incidentClipStartTime);
             var captureDirectory = Path.Combine(Application.temporaryCachePath, "MacacaBeacon", "Captures");
             Directory.CreateDirectory(captureDirectory);
             var outputStem = Path.Combine(captureDirectory, "incident-" + Guid.NewGuid().ToString("N"));
@@ -440,6 +544,9 @@ namespace MacacaGames.RuntimeBugReporter
                 out var preferMp4,
                 out var allowLegacyAviFallback,
                 out var allowCustomEncoder);
+            var allowWindowsSoftwareEncoder =
+                windowsVideoBackendMode == WindowsVideoBackendMode.SoftwareMp4 ||
+                windowsVideoBackendMode == WindowsVideoBackendMode.Auto && WindowsOpenH264Mp4Encoder.IsWine;
 #if UNITY_WEBGL && !UNITY_EDITOR
             if (preferMp4)
             {
@@ -448,7 +555,7 @@ namespace MacacaGames.RuntimeBugReporter
                     frames,
                     capturedWidth,
                     capturedHeight,
-                    settings.videoFramesPerSecond,
+                    effectiveCaptureFramesPerSecond,
                     settings.videoBitrateKbps,
                     durationSeconds,
                     (value, error) =>
@@ -464,7 +571,7 @@ namespace MacacaGames.RuntimeBugReporter
                         frames,
                         capturedWidth,
                         capturedHeight,
-                        settings.videoFramesPerSecond,
+                        effectiveCaptureFramesPerSecond,
                         settings.videoBitrateKbps,
                         durationSeconds,
                         settings.videoJpegQuality,
@@ -480,7 +587,7 @@ namespace MacacaGames.RuntimeBugReporter
                     frames,
                     capturedWidth,
                     capturedHeight,
-                    settings.videoFramesPerSecond,
+                    effectiveCaptureFramesPerSecond,
                     settings.videoBitrateKbps,
                     durationSeconds,
                     settings.videoJpegQuality,
@@ -497,7 +604,7 @@ namespace MacacaGames.RuntimeBugReporter
                     frames,
                     capturedWidth,
                     capturedHeight,
-                    settings.videoFramesPerSecond,
+                    effectiveCaptureFramesPerSecond,
                     settings.videoBitrateKbps,
                     durationSeconds,
                     (value, error) =>
@@ -515,7 +622,7 @@ namespace MacacaGames.RuntimeBugReporter
                     frames,
                     capturedWidth,
                     capturedHeight,
-                    settings.videoFramesPerSecond,
+                    effectiveCaptureFramesPerSecond,
                     settings.videoBitrateKbps,
                     durationSeconds,
                     settings.videoJpegQuality,
@@ -530,14 +637,15 @@ namespace MacacaGames.RuntimeBugReporter
                 frames,
                 capturedWidth,
                 capturedHeight,
-                settings.videoFramesPerSecond,
+                effectiveCaptureFramesPerSecond,
                 settings.videoBitrateKbps,
                 durationSeconds,
                 settings.videoJpegQuality,
                 preferMp4,
                 allowLegacyAviFallback,
                 out encoderError,
-                allowCustomEncoder));
+                allowCustomEncoder,
+                allowWindowsSoftwareEncoder));
 
             while (!task.IsCompleted)
                 yield return null;
@@ -573,8 +681,8 @@ namespace MacacaGames.RuntimeBugReporter
             }
             completed?.Invoke(result);
             DeleteFrameCache();
-            history.Clear();
-            historyBytes = 0;
+            ReleaseNativeFrames(frames);
+            ReleaseHistory();
             captureStartedTime = Time.realtimeSinceStartupAsDouble;
             if (!requestedEnabled)
                 StopCapture();
@@ -642,6 +750,45 @@ namespace MacacaGames.RuntimeBugReporter
             frameCacheDirectory = null;
         }
 
+        private void TrimHistory(double cutoff, long maximumBytes = long.MaxValue)
+        {
+            while (history.Count > 0 &&
+                   (history.Peek().CapturedAt < cutoff || historyBytes > maximumBytes))
+            {
+                var expired = history.Dequeue();
+                historyBytes -= expired.ByteCount;
+                expired.ReleaseNative();
+                if (!isFinalizing)
+                    expired.DeleteDataFile();
+            }
+        }
+
+        private void ReleaseHistory()
+        {
+            while (history.Count > 0)
+            {
+                var frame = history.Dequeue();
+                frame.ReleaseNative();
+            }
+            historyBytes = 0;
+        }
+
+        private static void RetainNativeFrames(IReadOnlyList<VideoCaptureFrame> frames)
+        {
+            if (frames == null)
+                return;
+            for (var index = 0; index < frames.Count; index++)
+                frames[index].RetainNative();
+        }
+
+        private static void ReleaseNativeFrames(IReadOnlyList<VideoCaptureFrame> frames)
+        {
+            if (frames == null)
+                return;
+            for (var index = 0; index < frames.Count; index++)
+                frames[index].ReleaseNative();
+        }
+
         private static bool AreRawFileFrames(IReadOnlyList<VideoCaptureFrame> frames)
         {
             if (frames == null || frames.Count == 0)
@@ -657,6 +804,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         public void Dispose()
         {
+            requestedEnabled = false;
             gpuRecorder?.Dispose();
             androidGpuRecorder?.Dispose();
             windowsGpuRecorder?.Dispose();

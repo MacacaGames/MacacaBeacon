@@ -40,7 +40,18 @@ $SourcePath = Join-Path $SourceDirectory "MacacaBeaconVideoWindows.cpp"
 $ObjectPath = Join-Path $env:TEMP "MacacaBeaconVideoWindows.obj"
 $ImportLibraryPath = Join-Path $env:TEMP "MacacaBeaconVideoWindows.lib"
 $PdbPath = Join-Path $OutputDirectory "MacacaBeaconVideoWindows.pdb"
-$Command = 'call "{0}" -no_logo -arch=x64 -host_arch=x64 && cl.exe /nologo /std:c++17 /EHsc /W4 /I"{1}" {2} /DUNICODE /D_UNICODE /c "{3}" /Fo"{4}" && link.exe /nologo /DLL /MACHINE:X64 /LTCG /OUT:"{5}" /IMPLIB:"{6}" /PDB:"{7}" "{4}" mfplat.lib mfreadwrite.lib mfuuid.lib windowscodecs.lib shlwapi.lib ole32.lib d3d11.lib d3d12.lib dxgi.lib' -f $DeveloperCommand, $UnityPluginApi, $CompilerFlags, $SourcePath, $ObjectPath, $OutputPath, $ImportLibraryPath, $PdbPath
+$OpenH264Root = $env:OPENH264_ROOT
+if (-not $OpenH264Root) {
+    throw "Set OPENH264_ROOT to an OpenH264 2.6.0 source/build directory containing codec\api\wels\codec_api.h and openh264.lib. The macOS cross-build script can fetch and build the pinned source automatically."
+}
+$OpenH264Include = Join-Path $OpenH264Root "codec\api\wels"
+$OpenH264Library = Join-Path $OpenH264Root "openh264.lib"
+if (-not (Test-Path (Join-Path $OpenH264Include "codec_api.h")) -or -not (Test-Path $OpenH264Library)) {
+    throw "OPENH264_ROOT does not contain codec\api\wels\codec_api.h and openh264.lib."
+}
+$SoftwareSourcePath = Join-Path $SourceDirectory "MacacaBeaconSoftwareVideo.cpp"
+$SoftwareObjectPath = Join-Path $env:TEMP "MacacaBeaconSoftwareVideo.obj"
+$Command = 'call "{0}" -no_logo -arch=x64 -host_arch=x64 && cl.exe /nologo /std:c++17 /EHsc /W4 /I"{1}" /I"{2}" {3} /DUNICODE /D_UNICODE /c "{4}" /Fo"{5}" && cl.exe /nologo /std:c++17 /EHsc /W4 /I"{1}" /I"{2}" {3} /DUNICODE /D_UNICODE /c "{6}" /Fo"{7}" && link.exe /nologo /DLL /MACHINE:X64 /LTCG /OUT:"{8}" /IMPLIB:"{9}" /PDB:"{10}" "{5}" "{7}" "{11}" mfplat.lib mfreadwrite.lib mfuuid.lib windowscodecs.lib shlwapi.lib ole32.lib d3d11.lib d3d12.lib dxgi.lib' -f $DeveloperCommand, $UnityPluginApi, $OpenH264Include, $CompilerFlags, $SourcePath, $ObjectPath, $SoftwareSourcePath, $SoftwareObjectPath, $OutputPath, $ImportLibraryPath, $PdbPath, $OpenH264Library
 
 & $env:ComSpec /d /s /c $Command
 if ($LASTEXITCODE -ne 0) {

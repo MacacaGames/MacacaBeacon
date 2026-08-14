@@ -31,7 +31,8 @@ namespace MacacaGames.RuntimeBugReporter
             bool preferMp4,
             bool allowLegacyAviFallback,
             out string error,
-            bool allowCustomEncoder = true)
+            bool allowCustomEncoder = true,
+            bool allowWindowsSoftwareEncoder = true)
         {
             error = null;
             if (frames == null || frames.Count == 0)
@@ -51,6 +52,45 @@ namespace MacacaGames.RuntimeBugReporter
                     TryDelete(customOutputPath);
                 }
 
+#if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
+                if (allowWindowsSoftwareEncoder)
+                {
+                    var software = new WindowsOpenH264Mp4Encoder();
+                    var softwareOutputPath = outputStem + software.Extension;
+                    string softwareError = null;
+                    if (software.IsAvailable &&
+                        software.TryEncode(
+                            softwareOutputPath,
+                            frames,
+                            width,
+                            height,
+                            framesPerSecond,
+                            bitrateKbps,
+                            durationSeconds,
+                            out softwareError))
+                        return new VideoCaptureResult(
+                            softwareOutputPath,
+                            software.Extension,
+                            software.MimeType,
+                            durationSeconds,
+                            frames.Count,
+                            software.Name,
+                            width,
+                            height);
+
+                    TryDelete(softwareOutputPath);
+                    if (!string.IsNullOrEmpty(softwareError))
+                        error = softwareError;
+                    else if (!software.IsAvailable)
+                        error = "The OpenH264 deferred software encoder is unavailable.";
+
+                    // Selecting this backend is authoritative. Preserve its
+                    // concrete failure and go directly to the configured AVI
+                    // fallback instead of silently touching Media Foundation.
+                    goto Mp4Failed;
+                }
+#endif
+
                 var mp4 = CreatePlatformMp4Encoder();
                 if (mp4.IsAvailable)
                 {
@@ -68,6 +108,8 @@ namespace MacacaGames.RuntimeBugReporter
                         : "Windows H.264 MP4 encoder is unavailable: " + availabilityError;
                 }
             }
+
+        Mp4Failed:
 
             if (!allowLegacyAviFallback)
                 return null;

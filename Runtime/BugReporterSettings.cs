@@ -116,7 +116,7 @@ namespace MacacaGames.RuntimeBugReporter
         [Min(20)] public int maximumLogEntries = 200;
 
         [Header("Rolling video (optional)")]
-        [Tooltip("Continuously caches low-rate raw frames on disk. Supported platforms finalize them as hardware H.264 MP4; JPEG/AVI is compatibility-only.")]
+        [Tooltip("Continuously caches raw rolling frames. Windows/Proton uses a bounded preallocated native RAM ring; other generic fallbacks may use temporary disk files.")]
         public bool enableRollingVideo = true;
         [Tooltip("Prefer a Slack-friendly H.264 MP4 when a runtime encoder backend is available.")]
         public bool preferMp4 = true;
@@ -128,7 +128,7 @@ namespace MacacaGames.RuntimeBugReporter
         [Range(320, 1920)] public int videoWidth = 960;
         [Range(20, 90)] public int videoJpegQuality = 65;
         [Range(128, 8000)] public int videoBitrateKbps = 1500;
-        [Tooltip("Maximum temporary disk space for raw rolling frames. Use at least 512 MB for 960 px wide portrait video at 6 FPS and an 8 second history.")]
+        [Tooltip("Maximum raw rolling-frame cache. Windows/Proton preallocates up to this RAM budget and automatically lowers capture FPS when the requested duration would exceed it; other generic paths use it as a temporary disk limit.")]
         [Range(32, 2048)] public int maximumVideoCacheMegabytes = 512;
         [Range(1, 100)] public int maximumAttachmentMegabytes = 25;
 

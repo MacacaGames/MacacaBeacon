@@ -67,7 +67,7 @@ Steam 專案可以在自己的 Steamworks 初始化完成後，以 `SteamUtils.I
 - Product、version、build GUID、Unity、platform、OS、CPU、RAM、GPU、VRAM、resolution、scene
 - 有固定容量上限的 recent log ring buffer；Error／Exception 包含 stack trace
 - 不受 recent log 淘汰影響的錄影關鍵 timeline，包含 backend、fallback 錯誤、輸出尺寸、frame 數、時長與有效 FPS
-- 選填影片：macOS／Windows／Android／iOS 優先 H.264 MP4，預設 6 FPS、前 8 秒＋後 1 秒、無音訊
+- 選填影片：macOS／Windows／Android／iOS 優先 H.264 MP4，預設 30 FPS、前 5 秒＋後 1 秒、無音訊
 
 表單內會顯示資料用途聲明；內容可由 Settings 自訂。請依發行地區及資料內容完成實際隱私／同意流程。
 
@@ -75,28 +75,21 @@ Steam 專案可以在自己的 Steamworks 初始化完成後，以 `SteamUtils.I
 
 `Enable Rolling Video` 預設關閉。macOS、iOS、Android 與 Windows 會依平台優先使用 GPU readback/native encoder；WebGL 則刻意使用 CPU JPEG capture，避開瀏覽器的 `AsyncGPUReadback` fence 問題，再交給瀏覽器 WebCodecs 做最後的 H.264 編碼。事件完成編碼或 runtime 關閉錄影後，rolling frame cache 會自動清除。
 
-`Maximum Video Cache Megabytes` 預設為 512 MB。`Video Width` 是錄影輸出寬度，不是螢幕原生寬度；例如 Steam Deck 的 1280×800 畫面在 960 設定下會先擷取完整 backbuffer，再等比例縮成 960×600，以控制 readback、cache、編碼與附件成本，不會取出 960×600 區域造成裁切。這個明確縮放只用在 generic fallback capture；正常 macOS／Windows GPU recorder 維持既有路徑。直式 960 px、6 FPS、8 秒歷史通常需要比橫式畫面更多 temporary space；raw cache 超過上限時會先丟棄最舊 frame，因此低儲存空間裝置的實際保留秒數可能短於 `Seconds Before`。啟動事件時會在 log 顯示 requested 與 available 秒數。這個限制只影響 temporary raw cache，最終 MP4 仍由 bitrate 與附件大小限制控制。
+`Maximum Video Cache Megabytes` 預設為 512 MB。`Video Width` 是錄影輸出寬度，不是螢幕原生寬度；例如 Steam Deck 的 1280×800 畫面在 960 設定下會先擷取完整 backbuffer，再等比例縮成 960×600，以控制 readback、cache、編碼與附件成本，不會取出 960×600 區域造成裁切。Windows／Proton generic recorder 啟動時會依寬高、前後秒數與 FPS 一次配置固定大小的 persistent `NativeArray` ring；若需求超過 cache 上限，會先降低有效 capture FPS，確保整個 incident window 與少量 in-flight slots 永遠落在預留區內。以 960×600、30 FPS、前 5 秒＋後 1 秒計算，raw ring 約使用 422 MiB。rolling 過程不建立每幀 `.rgba` 檔，也不在 managed heap 留下一整段 `byte[]`；只有回報頁面開啟、後段畫面收集完成後才開始編碼並寫出最終 MP4。若 `AsyncGPUReadback` 不可用或 RAM ring 配置失敗，仍保留原本 disk-backed generic fallback。
 
-macOS Editor／Standalone Player 與 iOS device／Simulator 會優先使用 Metal texture → IOSurface-backed CVPixelBuffer 的 GPU 路徑，再由 AVAssetWriter 產生 H.264 MP4；若 Apple GPU bridge 不可用，才回到 `AsyncGPUReadback` 的 CPU/native 路徑。macOS 使用套件內的 Universal Binary（Apple Silicon + Intel），iOS 則由 Unity 產生 Xcode project 時直接編入相同的 Apple native implementation。Windows Editor／64-bit Standalone Player 使用 Windows 內建 Media Foundation H.264 encoder。Windows GPU session 只有在 native pointer 有效且沒有初始化錯誤時才會啟用；若建立、送幀、segment finalization 或 incident merge 後續失敗，會釋放 GPU recorder 並在同一 runtime session 改用 generic recorder。Windows 與 Apple CPU fallback 直接接受 RGBA frame，不再經過 JPG encode/decode；不需要 ffmpeg 或隨 Player 安裝額外 codec。MIME type 都是 `video/mp4`，且會把 MP4 metadata 寫在 media data 前面，方便 Slack／瀏覽器提早建立預覽。
+macOS Editor／Standalone Player 與 iOS device／Simulator 會優先使用 Metal texture → IOSurface-backed CVPixelBuffer 的 GPU 路徑，再由 AVAssetWriter 產生 H.264 MP4；若 Apple GPU bridge 不可用，才回到 `AsyncGPUReadback` 的 CPU/native 路徑。macOS 使用套件內的 Universal Binary（Apple Silicon + Intel），iOS 則由 Unity 產生 Xcode project 時直接編入相同的 Apple native implementation。Windows Editor 保留 Media Foundation 與各 backend 的開發診斷能力；Windows Standalone Player 會自動辨識 Proton，Proton 使用 NativeArray RAM ring + deferred OpenH264，原生 Windows 維持 GPU／Media Foundation 路徑。MIME type 是 `video/mp4`，並把 MP4 metadata 寫在 media data 前面，方便 Slack／瀏覽器提早建立預覽。
 
-Windows build 經 Proton 執行時仍屬於 `UNITY_STANDALONE_WIN`，因此會先嘗試同一套 D3D11／D3D12 GPU recorder，而不是 native Linux backend。若 Proton 的 Media Foundation、D3D video processor、DXGI device manager 或 D3D12 shared-resource interop 無法完成，Macaca Beacon 會依實際錯誤切換 generic recorder，不需要偵測 Steam Deck 或引用 Steamworks。切換後的 rolling history 會重新累積；若 report 正在等待影片，會以切換當下開始的新 incident window 產生 partial recovery clip，無法補回 GPU backend 失敗前尚未完成的 frame。
+Windows build 經 Proton 執行時仍屬於 `UNITY_STANDALONE_WIN`。Standalone 啟動時會檢查 `ntdll.dll` 是否匯出 `wine_get_version`；命中後自動選擇 generic RAM ring + in-process OpenH264，不讀取 backend Launch Option，也不嘗試 Media Foundation 或 D3D11／D3D12 shared-resource interop。Proton readback 已是顯示順序，因此不再套用原生 Windows D3D 的額外垂直翻轉。rolling 階段只有 GPU readback 到預配置 RAM；Beacon UI 開啟後才在 background worker 將 RGBA 轉為 I420、由 OpenH264 軟體編碼並在同一個 native DLL 內封裝 fast-start MP4。若 OpenH264 失敗且 `Allow Legacy Avi Fallback` 開啟，仍可退回 managed AVI，但不會改走 Media Foundation。
 
 ### Steam Deck／Proton 錄影診斷
 
-不帶診斷參數時仍使用正式的 `auto` 行為：健康的 Windows GPU recorder 維持 native texture → H.264 MP4，不增加 per-frame 診斷成本，也不降低解析度、FPS 或 bitrate。以下模式只用於分層測試，透過 Steam 遊戲內容的 Launch Options 傳入；強制模式失敗後刻意不再嘗試其他 encoder，避免掩蓋真正故障層：
+Steam Deck 的 Windows Standalone build 不需要 backend Launch Option，直接以 `%command%` 啟動；偵測到 Proton 後會使用 NativeArray RAM ring + in-process OpenH264。`-macaca-beacon-video-backend` 目前只保留給 Windows Editor 做分層開發診斷，Player 會忽略它。實機測試可由 diagnostics 的 `mode=software-mp4, selected=software-mp4` 確認自動偵測成功。
 
-| 測試 | Steam Launch Options | 預期用途 |
-| --- | --- | --- |
-| DX11 GPU | `PROTON_LOG=1 DXVK_HUD=devinfo,fps %command% -force-d3d11 -macaca-beacon-video-backend=windows-gpu` | 測 D3D11 Video Processor、DXGI manager 與 GPU Media Foundation input |
-| DX12 GPU | `PROTON_LOG=1 VKD3D_DEBUG=warn %command% -force-d3d12 -macaca-beacon-video-backend=windows-gpu` | 額外測 D3D12 shared texture、fence 與 D3D11 interop |
-| Windows CPU Media Foundation | `PROTON_LOG=1 %command% -macaca-beacon-video-backend=windows-cpu` | 排除 GPU／DXGI input，只測 RGBA frame → Media Foundation H.264 MP4 |
-| Managed AVI | `PROTON_LOG=1 %command% -macaca-beacon-video-backend=managed-avi` | 排除 Media Foundation，測 generic capture、RGBA → JPEG、AVI 與 report attachment |
+Beacon 開啟時的單張 PNG 截圖在 Proton 下直接使用 Unity 回傳的當下 backbuffer texture，不依賴可能與 Gamescope viewport 暫時不同步的 `Screen.width`／`Screen.height` 建立畫布；這可避免偶發出現遊戲內容只佔截圖畫布一部分。此路徑只執行一次，不影響 rolling capture FPS。
 
 每次啟動後送出一份包含 Video 的 report。Slack 的 `diagnostics-*.txt` 會在一般 Recent logs 之前保留獨立的 `Video recording` 區段：列出螢幕與實際輸出尺寸、設定寬度、frame 數、時長、有效 FPS，以及不受 recent-log 上限淘汰的 backend／fallback 關鍵 timeline。開頭會列出 `mode`、實際 `selected` backend、renderer、GPU、OS 與 Unity version；失敗時會列出具體 D3D／Media Foundation operation 與 HRESULT。若仍需完整外部紀錄，Steam 的 Proton log 預設為 home 目錄下的 `steam-$APPID.log`；Windows Unity Player log 通常位於 Steam library 的 `steamapps/compatdata/$APPID/pfx/drive_c/users/steamuser/AppData/LocalLow/<CompanyName>/<ProductName>/Player.log`。
 
-判讀方式：DX11 成功但 DX12 失敗，問題集中在 D3D12 interop；兩個 GPU 模式失敗但 `windows-cpu` 成功，問題集中在 Video Processor／DXGI GPU input；`windows-cpu` 也失敗但 `managed-avi` 成功，表示 Proton 的 Media Foundation H.264 路徑不可用；連 `managed-avi` 都失敗時，應改查 generic capture、temporary cache 或 report attachment，而不是 GPU encoder。
-
-影片先寫進 `Application.temporaryCachePath`，建立 report 時再交易式複製到 PendingReports，Slack 則使用 `UploadHandlerFile` 直接由檔案上傳，避免另一份完整影片常駐 managed heap。Windows 與 Apple backend 在背景 thread 完成；Android 由 Unity main thread 啟動 Java encode job，實際檔案讀取、RGBA → YUV420 與 MediaCodec finalization 都在低優先序 Java worker 執行。回報表單在背景編碼期間仍可正常輸入，Send 會等影片 ready 後才開放。
+最終影片寫進 `Application.temporaryCachePath`，建立 report 時再交易式複製到 PendingReports，Slack 則使用 `UploadHandlerFile` 直接由檔案上傳，避免另一份完整影片常駐 managed heap。Windows rolling raw frames 在 finalization 前只存在預配置 RAM ring；Windows 與 Apple backend 在背景 thread 完成。Android 由 Unity main thread 啟動 Java encode job，實際檔案讀取、RGBA → YUV420 與 MediaCodec finalization 都在低優先序 Java worker 執行。回報表單在背景編碼期間仍可正常輸入，Send 會等影片 ready 後才開放。
 
 `Prefer Mp4` 預設開啟。若 generic recorder 所在平台尚無 MP4 backend，或 CPU/native H.264 encoder 暫時不可用，`Allow Legacy Avi Fallback` 可讓回報退回 managed MJPEG AVI，而不是失去這次影片。既有 JPEG frame 會直接封裝；disk-backed RGBA frame 則只在 fallback finalization 時使用 Unity thread-safe Image Conversion 與 `Video Jpeg Quality` 轉成 JPEG，不會把持續錄影改成每幀即時壓縮。目前正式 MP4 backend 支援矩陣：
 
@@ -108,7 +101,7 @@ Windows build 經 Proton 執行時仍屬於 `UNITY_STANDALONE_WIN`，因此會�
 | macOS Standalone (Intel / Apple Silicon) | H.264 MP4；可選 AVI fallback |
 | Windows Editor (x64) | H.264 MP4；可選 AVI fallback |
 | Windows Standalone (x64) | H.264 MP4；可選 AVI fallback |
-| Windows Standalone via Proton | Windows GPU H.264 成功時使用 MP4；GPU 失敗後改走 generic MP4，仍失敗時可退回 managed AVI |
+| Windows Standalone via Proton | NativeArray RAM ring + deferred in-process OpenH264 MP4；失敗時可退回 managed AVI |
 | iOS device／Simulator | Metal GPU + AVAssetWriter H.264 MP4；GPU 不可用時回退 CPU；可選 AVI fallback |
 | Android device | H.264 MP4（MediaCodec／MediaMuxer）；可選 AVI fallback |
 | Linux／Steam Deck native Player | Managed MJPEG AVI fallback（RGBA → JPEG）；介面已保留平台 encoder 擴充點 |
@@ -116,7 +109,7 @@ Windows build 經 Proton 執行時仍屬於 `UNITY_STANDALONE_WIN`，因此會�
 
 macOS native source 位於 `Native~/macOS`，執行 `build.sh` 可重建 `Runtime/Plugins/macOS/MacacaBeaconVideo.bundle`。它只連結 Apple 系統 framework，沒有額外第三方 runtime dependency。
 
-Windows native source 位於 `Native~/Windows`。在裝有 Visual Studio 2022「Desktop development with C++」與 Windows 10/11 SDK 的 Windows 主機執行 `build.ps1`，即可重建 `Runtime/Plugins/Windows/x86_64/MacacaBeaconVideoWindows.dll`；macOS package 維護者也可安裝 MinGW-w64 後執行 `build-cross.sh`。正式支援 Windows 10/11 x64；32-bit Windows、UWP 與 ARM64 目前不在 PluginImporter 支援範圍。
+Windows native source 位於 `Native~/Windows`。在裝有 Visual Studio 2022「Desktop development with C++」、Windows 10/11 SDK，並將 `OPENH264_ROOT` 指向 OpenH264 2.6.0 headers 與 `openh264.lib` 的 Windows 主機執行 `build.ps1`，即可重建 `Runtime/Plugins/Windows/x86_64/MacacaBeaconVideoWindows.dll`；macOS package 維護者也可安裝 MinGW-w64 後執行 `build-cross.sh`，腳本會抓取並驗證 pinned OpenH264 commit 後從 source 靜態連結。Player 不需額外 `openh264.dll`。OpenH264 的 BSD 授權與 H.264 patent notice 記錄在 `OPENH264-LICENSE.md`；發佈產品前仍應由產品方確認適用地區的專利授權義務。正式支援 Windows 10/11 x64；32-bit Windows、UWP 與 ARM64 目前不在 PluginImporter 支援範圍。
 
 iOS 使用 `Runtime/Plugins/iOS/MacacaBeaconVideo.mm`，由 Unity 產生 Xcode project 時直接編入，透過 `DllImport("__Internal")` 呼叫 Metal render-event bridge 與 AVAssetWriter。GPU 路徑直接把 Unity Metal texture blit 到 IOSurface-backed CVPixelBuffer，並使用 iOS 硬體 H.264 路徑；PluginImporter 會加入 AVFoundation、CoreGraphics、CoreMedia、CoreVideo、ImageIO、Metal 與 VideoToolbox。不需要在 Scene 放置額外元件。
 
@@ -222,7 +215,7 @@ git commit -m "Update Macaca Beacon"
 
 `v0.5.0` 是目前的穩定版本 tag。更新到其他版本時，將 URL 最後的 tag 替換成指定版本，例如 `#v0.4.0`。由於 package 位於 repository 根目錄，Git URL 不需要 `path` 參數。
 
-套件 managed runtime assembly 沒有第三方相依；需要 Unity 的 IMGUI、Video、UnityWebRequest、ScreenCapture 與 ImageConversion built-in modules。macOS／iOS MP4 backend 使用系統內建的 AVFoundation、VideoToolbox、CoreMedia、CoreVideo 與 Metal frameworks；Windows MP4 backend 使用系統內建的 Media Foundation 與 COM；Android MP4 backend 使用系統內建的 MediaCodec 與 MediaMuxer。ImageIO、WIC 與 Bitmap APIs 僅保留給 JPEG compatibility fallback。
+套件 managed runtime assembly 沒有第三方 managed 相依；需要 Unity 的 IMGUI、Video、UnityWebRequest、ScreenCapture、ImageConversion 與 Collections built-in modules。macOS／iOS MP4 backend 使用系統內建的 AVFoundation、VideoToolbox、CoreMedia、CoreVideo 與 Metal frameworks；Windows native plugin 使用系統內建的 Media Foundation／COM，並靜態連結 BSD-licensed OpenH264 作為 Proton deferred software fallback；Android MP4 backend 使用系統內建的 MediaCodec 與 MediaMuxer。ImageIO、WIC 與 Bitmap APIs 僅保留給 JPEG compatibility fallback。
 
 ## 參考
 

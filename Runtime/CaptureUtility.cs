@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -25,6 +26,24 @@ namespace MacacaGames.RuntimeBugReporter
             var webglBytes = webglTexture == null ? null : webglTexture.EncodeToPNG();
             completed?.Invoke(webglBytes, webglTexture);
             yield break;
+#endif
+
+#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
+            if (WindowsOpenH264Mp4Encoder.IsWine)
+            {
+                // Gamescope/Proton can update Screen.width/height one frame
+                // before the actual backbuffer viewport changes. Allocating a
+                // RenderTexture from that transient size leaves the captured
+                // game image in only part of a larger canvas. Let Unity return
+                // the exact current backbuffer texture for this one-shot UI
+                // screenshot instead of predicting its dimensions.
+                var protonTexture = ScreenCapture.CaptureScreenshotAsTexture();
+                if (protonTexture != null && protonTexture.width > 0 && protonTexture.height > 0)
+                {
+                    completed?.Invoke(protonTexture.EncodeToPNG(), protonTexture);
+                    yield break;
+                }
+            }
 #endif
 
             // Use the same backbuffer capture path as video on Android. The
@@ -291,6 +310,73 @@ namespace MacacaGames.RuntimeBugReporter
             }
 
             completed?.Invoke(frame, frame == null ? 0 : width, frame == null ? 0 : height);
+        }
+
+        public static IEnumerator CaptureScaledRgbaIntoNativeArrayAsync(
+            NativeVideoFrame destination,
+            Action<bool, bool> completed)
+        {
+            yield return new WaitForEndOfFrame();
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+            destination?.CompleteRequest(false);
+            completed?.Invoke(false, false);
+            yield break;
+#else
+            if (destination == null || !SystemInfo.supportsAsyncGPUReadback)
+            {
+                destination?.CompleteRequest(false);
+                completed?.Invoke(false, false);
+                yield break;
+            }
+
+            var renderTexture = RenderTexture.GetTemporary(
+                destination.Width,
+                destination.Height,
+                0,
+                RenderTextureFormat.ARGB32,
+                RenderTextureReadWrite.sRGB);
+            RenderTexture sourceTexture = null;
+            var request = default(AsyncGPUReadbackRequest);
+            var succeeded = false;
+            try
+            {
+                CaptureIntoRenderTexture(
+                    renderTexture,
+                    Screen.width,
+                    Screen.height,
+                    out sourceTexture);
+                request = AsyncGPUReadback.RequestIntoNativeArray(
+                    ref destination.Data,
+                    renderTexture,
+                    0,
+                    TextureFormat.RGBA32,
+                    null);
+                while (!request.done)
+                    yield return null;
+                succeeded = !request.hasError;
+            }
+            finally
+            {
+                destination.CompleteRequest(succeeded);
+                if (sourceTexture != null)
+                    RenderTexture.ReleaseTemporary(sourceTexture);
+                RenderTexture.ReleaseTemporary(renderTexture);
+            }
+
+            // Keep orientation as metadata. Deferred encoders can read rows in
+            // reverse order without spending rolling-capture CPU time swapping
+            // a multi-megabyte frame in place.
+            // Unity's Windows/D3D readback normally needs the historical row
+            // flip, but DXVK/VKD3D under Proton already returns this capture
+            // in display order. Applying both transforms produced an upside-
+            // down MP4 on Steam Deck.
+            var rowsAreBottomUp = !WindowsOpenH264Mp4Encoder.IsWine &&
+                (Application.platform == RuntimePlatform.WindowsEditor ||
+                 Application.platform == RuntimePlatform.WindowsPlayer ||
+                 !SystemInfo.graphicsUVStartsAtTop);
+            completed?.Invoke(succeeded, rowsAreBottomUp);
+#endif
         }
 
         internal static void CalculateScaledSize(

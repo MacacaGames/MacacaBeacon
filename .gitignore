@@ -67,3 +67,6 @@ artifacts/
 
 # Publish output
 publish/
+
+# Native dependency build cache
+Native~/**/.build/
