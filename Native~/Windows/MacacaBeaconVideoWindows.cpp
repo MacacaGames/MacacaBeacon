@@ -166,6 +166,7 @@ namespace
         bool ready = false;
         bool finalized = false;
         bool gpuInput = false;
+        bool d3d11IsolatedInput = false;
         bool d3d12Input = false;
         volatile LONG pendingGpuEvents = 0;
         std::string lastError;
@@ -173,6 +174,12 @@ namespace
         std::wstring outputPath;
         int bitrate = 0;
         EncoderSession* d3d12Delegate = nullptr;
+        ID3D11DeviceContext* d3d11CaptureContext = nullptr;
+        ID3D11Texture2D* d3d11CaptureSharedTexture = nullptr;
+        IDXGIKeyedMutex* d3d11CaptureKeyedMutex = nullptr;
+        IDXGIKeyedMutex* d3d11WorkerKeyedMutex = nullptr;
+        HANDLE d3d11LegacySharedHandle = nullptr;
+        LUID d3d11AdapterLuid = {};
         ID3D12Device* d3d12Device = nullptr;
         ID3D12CommandAllocator* d3d12CommandAllocator = nullptr;
         ID3D12GraphicsCommandList* d3d12CommandList = nullptr;
@@ -186,6 +193,7 @@ namespace
         UINT64 sharedFenceValue = 0;
         UINT64 pendingD3D12FenceValue = 0;
         UINT64 d3d12ReleaseFenceValue = 0;
+        bool d3d11FramePending = false;
         bool d3d12FramePending = false;
         double pendingPresentationSeconds = 0.0;
         volatile LONG d3d12WorkerBusy = 0;
@@ -224,6 +232,10 @@ namespace
             SafeRelease(videoEnumerator);
             SafeRelease(videoContext);
             SafeRelease(videoDevice);
+            SafeRelease(d3d11CaptureKeyedMutex);
+            SafeRelease(d3d11WorkerKeyedMutex);
+            SafeRelease(d3d11CaptureSharedTexture);
+            SafeRelease(d3d11CaptureContext);
             SafeRelease(d3dDevice);
             // D3D11, Media Foundation and their delegate are created and
             // released by the encoder worker that uses them.
@@ -721,12 +733,24 @@ static EncoderSession* CreateEncoderSession(
             result = E_POINTER;
         }
         ID3D11DeviceContext* immediateContext = nullptr;
+        ID3D10Multithread* multithread = nullptr;
         if (SUCCEEDED(result))
             session->d3dDevice->GetImmediateContext(&immediateContext);
         if (SUCCEEDED(result) && immediateContext == nullptr)
         {
             failedOperation = "Get D3D11 immediate context";
             result = E_POINTER;
+        }
+        if (SUCCEEDED(result))
+        {
+            failedOperation = "QueryInterface ID3D10Multithread on encoder D3D11 immediate context";
+            result = immediateContext->QueryInterface(IID_PPV_ARGS(&multithread));
+        }
+        if (SUCCEEDED(result))
+        {
+            // Media Foundation can use the dedicated encoder device from its
+            // own worker threads, so protect that device's immediate context.
+            multithread->SetMultithreadProtected(TRUE);
         }
         if (SUCCEEDED(result))
         {
@@ -738,6 +762,7 @@ static EncoderSession* CreateEncoderSession(
             failedOperation = "Query ID3D11VideoContext";
             result = immediateContext->QueryInterface(IID_PPV_ARGS(&session->videoContext));
         }
+        SafeRelease(multithread);
         SafeRelease(immediateContext);
 
         D3D11_VIDEO_PROCESSOR_CONTENT_DESC contentDescription = {};
@@ -831,6 +856,156 @@ static EncoderSession* CreateD3D12PendingSession(
     return session;
 }
 
+static DWORD WINAPI D3D12EncoderWorker(void* context);
+
+static EncoderSession* CreateD3D11PendingSession(
+    const char* outputPath,
+    int width,
+    int height,
+    int framesPerSecond,
+    int bitrate,
+    ID3D11Texture2D* source)
+{
+    EncoderSession* session = new (std::nothrow) EncoderSession();
+    if (session == nullptr)
+        return nullptr;
+    session->width = std::max(2, width & ~1);
+    session->height = std::max(2, height & ~1);
+    session->framesPerSecond = std::max(1, framesPerSecond);
+    session->frameDuration = 10000000LL / session->framesPerSecond;
+    session->gpuInput = true;
+    session->d3d11IsolatedInput = true;
+    session->outputPathUtf8 = outputPath == nullptr ? std::string() : outputPath;
+    session->outputPath = Utf8ToWide(outputPath);
+    session->bitrate = std::max(128000, bitrate);
+    if (session->outputPath.empty())
+    {
+        session->lastError = "The MP4 output path was empty or invalid UTF-8.";
+        return session;
+    }
+    if (source == nullptr)
+    {
+        session->lastError = "The Unity D3D11 capture texture was null.";
+        return session;
+    }
+
+    D3D11_TEXTURE2D_DESC sourceDescription = {};
+    source->GetDesc(&sourceDescription);
+    if (sourceDescription.Width != static_cast<UINT>(session->width) ||
+        sourceDescription.Height != static_cast<UINT>(session->height) ||
+        sourceDescription.SampleDesc.Count != 1 ||
+        (sourceDescription.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+         sourceDescription.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB &&
+         sourceDescription.Format != DXGI_FORMAT_B8G8R8A8_TYPELESS))
+    {
+        session->lastError = "The D3D11 capture texture must be non-MSAA BGRA8 and match the encoder dimensions.";
+        return session;
+    }
+
+    IDXGIDevice* dxgiDevice = nullptr;
+    IDXGIAdapter* adapter = nullptr;
+    IDXGIResource* sharedResource = nullptr;
+    const char* failedOperation = "Get D3D11 device from the Unity capture texture";
+    HRESULT result = S_OK;
+    source->GetDevice(&session->d3dDevice);
+    if (session->d3dDevice == nullptr)
+        result = E_POINTER;
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "Get Unity D3D11 immediate context";
+        session->d3dDevice->GetImmediateContext(&session->d3d11CaptureContext);
+        if (session->d3d11CaptureContext == nullptr)
+            result = E_POINTER;
+    }
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "Query IDXGIDevice for the Unity D3D11 adapter";
+        result = session->d3dDevice->QueryInterface(IID_PPV_ARGS(&dxgiDevice));
+    }
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "Get Unity D3D11 adapter";
+        result = dxgiDevice->GetAdapter(&adapter);
+    }
+    DXGI_ADAPTER_DESC adapterDescription = {};
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "Get Unity D3D11 adapter description";
+        result = adapter->GetDesc(&adapterDescription);
+        session->d3d11AdapterLuid = adapterDescription.AdapterLuid;
+    }
+    if (SUCCEEDED(result))
+    {
+        D3D11_TEXTURE2D_DESC sharedDescription = {};
+        sharedDescription.Width = static_cast<UINT>(session->width);
+        sharedDescription.Height = static_cast<UINT>(session->height);
+        sharedDescription.MipLevels = 1;
+        sharedDescription.ArraySize = 1;
+        sharedDescription.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        sharedDescription.SampleDesc.Count = 1;
+        sharedDescription.Usage = D3D11_USAGE_DEFAULT;
+        sharedDescription.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        sharedDescription.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+        failedOperation = "Create isolated D3D11 encoder shared texture";
+        result = session->d3dDevice->CreateTexture2D(
+            &sharedDescription, nullptr, &session->d3d11CaptureSharedTexture);
+    }
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "Query IDXGIKeyedMutex for the Unity D3D11 shared texture";
+        result = session->d3d11CaptureSharedTexture->QueryInterface(
+            IID_PPV_ARGS(&session->d3d11CaptureKeyedMutex));
+    }
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "Query IDXGIResource for the Unity D3D11 shared texture";
+        result = session->d3d11CaptureSharedTexture->QueryInterface(IID_PPV_ARGS(&sharedResource));
+    }
+    if (SUCCEEDED(result))
+    {
+        failedOperation = "Get D3D11 shared texture handle";
+        result = sharedResource->GetSharedHandle(&session->d3d11LegacySharedHandle);
+    }
+    SafeRelease(sharedResource);
+    SafeRelease(adapter);
+    SafeRelease(dxgiDevice);
+    if (FAILED(result))
+    {
+        session->Fail(failedOperation, result);
+        return session;
+    }
+
+    session->d3d12WorkerWakeEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    session->d3d12WorkerIdleEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    session->d3d12WorkerReadyEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (session->d3d12WorkerWakeEvent == nullptr || session->d3d12WorkerIdleEvent == nullptr ||
+        session->d3d12WorkerReadyEvent == nullptr)
+    {
+        session->Fail("Could not create the D3D11 encoder worker events", HRESULT_FROM_WIN32(GetLastError()));
+        return session;
+    }
+    session->d3d12WorkerThread = CreateThread(
+        nullptr, 0, &D3D12EncoderWorker, session, 0, nullptr);
+    if (session->d3d12WorkerThread == nullptr)
+    {
+        session->Fail("Could not create the D3D11 encoder worker", HRESULT_FROM_WIN32(GetLastError()));
+        return session;
+    }
+    if (WaitForSingleObject(session->d3d12WorkerReadyEvent, 10000) != WAIT_OBJECT_0)
+    {
+        session->Fail("Timed out initializing the D3D11 encoder worker", E_FAIL);
+        return session;
+    }
+    if (InterlockedCompareExchange(&session->d3d12WorkerInitialized, 0, 0) <= 0)
+    {
+        if (session->lastError.empty())
+            session->lastError = "Could not initialize the isolated D3D11 encoder worker.";
+        return session;
+    }
+    session->ready = true;
+    return session;
+}
+
 static bool WaitForSharedFence(EncoderSession* session, UINT64 value)
 {
     if (session == nullptr || session->sharedFence == nullptr || value == 0)
@@ -869,9 +1044,12 @@ static bool WaitForD3D11Completion(EncoderSession* session)
             return session->Fail("Could not wait for the D3D11 GPU capture", result);
         if (GetTickCount64() >= deadline)
         {
-            const HRESULT deviceResult = session->d3d12Device == nullptr
-                ? E_FAIL
-                : session->d3d12Device->GetDeviceRemovedReason();
+            HRESULT deviceResult = E_FAIL;
+            if (session->d3d12Device != nullptr)
+                deviceResult = session->d3d12Device->GetDeviceRemovedReason();
+            else if (session->d3d12Delegate != nullptr &&
+                     session->d3d12Delegate->d3dDevice != nullptr)
+                deviceResult = session->d3d12Delegate->d3dDevice->GetDeviceRemovedReason();
             return session->Fail("Timed out waiting for the D3D11 GPU capture", FAILED(deviceResult) ? deviceResult : E_FAIL);
         }
         Sleep(1);
@@ -880,7 +1058,8 @@ static bool WaitForD3D11Completion(EncoderSession* session)
 
 static bool InitializeD3D11EncoderWorker(EncoderSession* session)
 {
-    if (session == nullptr || session->d3d12Device == nullptr)
+    if (session == nullptr ||
+        (!session->d3d11IsolatedInput && session->d3d12Device == nullptr))
         return false;
 
     IDXGIFactory6* factory = nullptr;
@@ -894,8 +1073,11 @@ static bool InitializeD3D11EncoderWorker(EncoderSession* session)
     if (SUCCEEDED(result))
     {
         failedOperation = "EnumAdapterByLuid";
+        const LUID adapterLuid = session->d3d11IsolatedInput
+            ? session->d3d11AdapterLuid
+            : session->d3d12Device->GetAdapterLuid();
         result = factory->EnumAdapterByLuid(
-            session->d3d12Device->GetAdapterLuid(), IID_PPV_ARGS(&adapter));
+            adapterLuid, IID_PPV_ARGS(&adapter));
     }
     const D3D_FEATURE_LEVEL featureLevels[] = {
         D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0
@@ -916,7 +1098,7 @@ static bool InitializeD3D11EncoderWorker(EncoderSession* session)
     }
     if (SUCCEEDED(result))
         multithread->SetMultithreadProtected(TRUE);
-    if (SUCCEEDED(result))
+    if (SUCCEEDED(result) && !session->d3d11IsolatedInput)
     {
         failedOperation = "QueryInterface ID3D11Device5";
         result = interopDevice->QueryInterface(IID_PPV_ARGS(&interopDevice5));
@@ -926,11 +1108,23 @@ static bool InitializeD3D11EncoderWorker(EncoderSession* session)
         failedOperation = "QueryInterface ID3D11DeviceContext4";
         result = interopContext->QueryInterface(IID_PPV_ARGS(&session->d3d11Context4));
     }
-    if (SUCCEEDED(result))
+    if (SUCCEEDED(result) && !session->d3d11IsolatedInput)
     {
         failedOperation = "OpenSharedResource1 texture";
         result = interopDevice5->OpenSharedResource1(
             session->sharedTextureHandle, IID_PPV_ARGS(&session->d3d11SharedTexture));
+    }
+    if (SUCCEEDED(result) && session->d3d11IsolatedInput)
+    {
+        failedOperation = "Open isolated D3D11 shared texture";
+        result = interopDevice->OpenSharedResource(
+            session->d3d11LegacySharedHandle, IID_PPV_ARGS(&session->d3d11SharedTexture));
+    }
+    if (SUCCEEDED(result) && session->d3d11IsolatedInput)
+    {
+        failedOperation = "Query IDXGIKeyedMutex for the encoder D3D11 shared texture";
+        result = session->d3d11SharedTexture->QueryInterface(
+            IID_PPV_ARGS(&session->d3d11WorkerKeyedMutex));
     }
     if (SUCCEEDED(result))
     {
@@ -972,7 +1166,9 @@ static bool InitializeD3D11EncoderWorker(EncoderSession* session)
         if (session->d3d12Delegate != nullptr && !session->d3d12Delegate->lastError.empty())
             session->lastError = session->d3d12Delegate->lastError;
         else
-            session->lastError = "Could not initialize the D3D12 Media Foundation delegate.";
+            session->lastError = session->d3d11IsolatedInput
+                ? "Could not initialize the isolated D3D11 Media Foundation delegate."
+                : "Could not initialize the D3D12 Media Foundation delegate.";
         return false;
     }
     return true;
@@ -1082,6 +1278,47 @@ static bool InitializeD3D12Interop(EncoderSession* session, ID3D12Resource* sour
     return true;
 }
 
+static bool ConsumePendingD3D11Frame(EncoderSession* session)
+{
+    if (session == nullptr || !session->d3d11FramePending)
+        return true;
+    if (session->d3d11WorkerKeyedMutex == nullptr || session->d3d11Context4 == nullptr ||
+        session->d3d11SharedTexture == nullptr || session->d3d11CopyTexture == nullptr)
+        return session->Fail("The isolated D3D11 encoder worker is not ready", E_UNEXPECTED);
+
+    HRESULT result = session->d3d11WorkerKeyedMutex->AcquireSync(1, 10000);
+    if (result != S_OK)
+    {
+        session->d3d11FramePending = false;
+        return session->Fail(
+            result == static_cast<HRESULT>(WAIT_TIMEOUT)
+                ? "Timed out acquiring the isolated D3D11 capture texture"
+                : "Could not acquire the isolated D3D11 capture texture",
+            result == static_cast<HRESULT>(WAIT_TIMEOUT) ? HRESULT_FROM_WIN32(WAIT_TIMEOUT) : result);
+    }
+
+    session->d3d11Context4->CopyResource(
+        session->d3d11CopyTexture, session->d3d11SharedTexture);
+    session->d3d11Context4->End(session->d3d11CompletionQuery);
+    session->d3d11Context4->Flush();
+    const bool copied = WaitForD3D11Completion(session);
+    const HRESULT releaseResult = session->d3d11WorkerKeyedMutex->ReleaseSync(0);
+    session->d3d11FramePending = false;
+    if (!copied)
+        return false;
+    if (FAILED(releaseResult))
+        return session->Fail("Could not release the isolated D3D11 capture texture", releaseResult);
+
+    const bool written = WriteGpuFrame(
+        session->d3d12Delegate, session->d3d11CopyTexture,
+        session->pendingPresentationSeconds);
+    session->d3d11Context4->Flush();
+    if (!written)
+        return false;
+    session->lastSampleTime = session->d3d12Delegate->lastSampleTime;
+    return true;
+}
+
 static bool ConsumePendingD3D12Frame(EncoderSession* session)
 {
     if (session == nullptr || !session->d3d12FramePending)
@@ -1130,7 +1367,11 @@ static DWORD WINAPI D3D12EncoderWorker(void* context)
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool uninitializeCom = SUCCEEDED(comResult);
     if (FAILED(comResult) && comResult != RPC_E_CHANGED_MODE)
-        session->Fail("Could not initialize the D3D12 encoder worker COM apartment", comResult);
+        session->Fail(
+            session->d3d11IsolatedInput
+                ? "Could not initialize the D3D11 encoder worker COM apartment"
+                : "Could not initialize the D3D12 encoder worker COM apartment",
+            comResult);
 
     const bool initialized =
         (SUCCEEDED(comResult) || comResult == RPC_E_CHANGED_MODE) &&
@@ -1169,7 +1410,10 @@ static DWORD WINAPI D3D12EncoderWorker(void* context)
         }
         else
         {
-            ConsumePendingD3D12Frame(session);
+            if (session->d3d11IsolatedInput)
+                ConsumePendingD3D11Frame(session);
+            else
+                ConsumePendingD3D12Frame(session);
         }
         InterlockedExchange(&session->d3d12WorkerBusy, 0);
         SetEvent(session->d3d12WorkerIdleEvent);
@@ -1179,12 +1423,81 @@ static DWORD WINAPI D3D12EncoderWorker(void* context)
     session->d3d12Delegate = nullptr;
     SafeRelease(session->d3d11CompletionQuery);
     SafeRelease(session->d3d11Context4);
+    SafeRelease(session->d3d11WorkerKeyedMutex);
     SafeRelease(session->d3d11SharedTexture);
     SafeRelease(session->d3d11CopyTexture);
 
     if (uninitializeCom)
         CoUninitialize();
     return 0;
+}
+
+static bool WriteD3D11IsolatedFrame(
+    EncoderSession* session,
+    void* nativeTexture,
+    double presentationSeconds)
+{
+    if (session == nullptr || nativeTexture == nullptr || !session->ready || session->finalized)
+        return false;
+    if (session->d3d11CaptureContext == nullptr ||
+        session->d3d11CaptureSharedTexture == nullptr ||
+        session->d3d11CaptureKeyedMutex == nullptr ||
+        session->d3d12WorkerWakeEvent == nullptr ||
+        session->d3d12WorkerIdleEvent == nullptr)
+        return session->Fail("The isolated D3D11 capture session is not ready", E_UNEXPECTED);
+
+    auto* source = static_cast<ID3D11Texture2D*>(nativeTexture);
+    D3D11_TEXTURE2D_DESC description = {};
+    source->GetDesc(&description);
+    if (description.Width != static_cast<UINT>(session->width) ||
+        description.Height != static_cast<UINT>(session->height) ||
+        description.SampleDesc.Count != 1 ||
+        (description.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+         description.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB &&
+         description.Format != DXGI_FORMAT_B8G8R8A8_TYPELESS))
+        return session->Fail("The D3D11 capture texture changed format or dimensions", E_INVALIDARG);
+
+    // Keep Unity's render thread non-blocking. A single shared slot is enough
+    // for rolling capture; if the encoder still owns it, drop this frame.
+    if (InterlockedCompareExchange(&session->d3d12WorkerBusy, 1, 0) != 0)
+        return true;
+    ResetEvent(session->d3d12WorkerIdleEvent);
+
+    HRESULT result = session->d3d11CaptureKeyedMutex->AcquireSync(0, 0);
+    if (result == static_cast<HRESULT>(WAIT_TIMEOUT))
+    {
+        InterlockedExchange(&session->d3d12WorkerBusy, 0);
+        SetEvent(session->d3d12WorkerIdleEvent);
+        return true;
+    }
+    if (result != S_OK)
+    {
+        InterlockedExchange(&session->d3d12WorkerBusy, 0);
+        SetEvent(session->d3d12WorkerIdleEvent);
+        return session->Fail("Could not acquire the Unity D3D11 shared capture texture", result);
+    }
+
+    session->d3d11CaptureContext->CopyResource(
+        session->d3d11CaptureSharedTexture, source);
+    session->d3d11CaptureContext->Flush();
+    result = session->d3d11CaptureKeyedMutex->ReleaseSync(1);
+    if (FAILED(result))
+    {
+        InterlockedExchange(&session->d3d12WorkerBusy, 0);
+        SetEvent(session->d3d12WorkerIdleEvent);
+        return session->Fail("Could not hand the D3D11 capture texture to the encoder worker", result);
+    }
+
+    session->pendingPresentationSeconds = presentationSeconds;
+    session->d3d11FramePending = true;
+    if (!SetEvent(session->d3d12WorkerWakeEvent))
+    {
+        session->d3d11FramePending = false;
+        InterlockedExchange(&session->d3d12WorkerBusy, 0);
+        SetEvent(session->d3d12WorkerIdleEvent);
+        return session->Fail("Could not wake the D3D11 encoder worker", HRESULT_FROM_WIN32(GetLastError()));
+    }
+    return true;
 }
 
 static bool WriteD3D12Frame(EncoderSession* session, void* nativeTexture, double presentationSeconds)
@@ -1306,8 +1619,9 @@ extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_GpuCreat
     int bitrate,
     void* nativeTexture)
 {
-    return CreateEncoderSession(outputPath, width, height, framesPerSecond, bitrate,
-        static_cast<ID3D11Texture2D*>(nativeTexture), true);
+    return CreateD3D11PendingSession(
+        outputPath, width, height, framesPerSecond, bitrate,
+        static_cast<ID3D11Texture2D*>(nativeTexture));
 }
 
 extern "C" __declspec(dllexport) void* __cdecl MacacaBeaconWindowsVideo_GpuCreateD3D12(
@@ -1335,6 +1649,8 @@ static void UNITY_INTERFACE_API MacacaBeaconWindowsVideo_RenderEvent(int eventId
     {
         if (session->d3d12Input)
             WriteD3D12Frame(session, submit->nativeTexture, submit->presentationSeconds);
+        else if (session->d3d11IsolatedInput)
+            WriteD3D11IsolatedFrame(session, submit->nativeTexture, submit->presentationSeconds);
         else
             WriteGpuFrame(session, submit->nativeTexture, submit->presentationSeconds);
     }
@@ -1433,19 +1749,23 @@ extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_Finish(voi
     while (InterlockedCompareExchange(&request->pendingGpuEvents, 0, 0) != 0)
         Sleep(0);
     EncoderSession* session = request;
-    if (request->d3d12Input)
+    if (request->d3d11IsolatedInput || request->d3d12Input)
     {
         if (request->d3d12WorkerIdleEvent == nullptr ||
             WaitForSingleObject(request->d3d12WorkerIdleEvent, 30000) != WAIT_OBJECT_0)
         {
-            request->lastError = "Timed out waiting for the D3D12 encoder worker.";
+            request->lastError = request->d3d11IsolatedInput
+                ? "Timed out waiting for the D3D11 encoder worker."
+                : "Timed out waiting for the D3D12 encoder worker.";
             return 0;
         }
         session = request->d3d12Delegate;
         if (session == nullptr)
         {
             if (request->lastError.empty())
-                request->lastError = "The D3D12 video session did not receive a frame.";
+                request->lastError = request->d3d11IsolatedInput
+                    ? "The D3D11 video session did not receive a frame."
+                    : "The D3D12 video session did not receive a frame.";
             return 0;
         }
         if (!session->ready || session->finalized || session->lastSampleTime < 0)
@@ -1462,7 +1782,9 @@ extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_Finish(voi
         if (!SetEvent(request->d3d12WorkerWakeEvent) ||
             WaitForSingleObject(request->d3d12WorkerIdleEvent, 30000) != WAIT_OBJECT_0)
         {
-            request->lastError = "Timed out finalizing the D3D12 encoder worker.";
+            request->lastError = request->d3d11IsolatedInput
+                ? "Timed out finalizing the D3D11 encoder worker."
+                : "Timed out finalizing the D3D12 encoder worker.";
             return 0;
         }
         if (InterlockedCompareExchange(&request->d3d12WorkerFinalizeResult, 0, 0) != 1)
@@ -1504,7 +1826,8 @@ extern "C" __declspec(dllexport) int __cdecl MacacaBeaconWindowsVideo_Finish(voi
 extern "C" __declspec(dllexport) const char* __cdecl MacacaBeaconWindowsVideo_LastError(void* pointer)
 {
     EncoderSession* session = static_cast<EncoderSession*>(pointer);
-    if (session != nullptr && session->d3d12Input && session->d3d12Delegate != nullptr &&
+    if (session != nullptr && (session->d3d11IsolatedInput || session->d3d12Input) &&
+        session->d3d12Delegate != nullptr &&
         !session->d3d12Delegate->lastError.empty())
         return session->d3d12Delegate->lastError.c_str();
     if (session == nullptr || session->lastError.empty())
