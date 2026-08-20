@@ -1,3 +1,3 @@
 using System.Runtime.CompilerServices;
 
-[assembly: InternalsVisibleTo("MacacaGames.RuntimeBugReporter.InputSystem")]
+[assembly: InternalsVisibleTo("MacacaGames.RuntimeBugReporter.SoftwareCursor.InputSystem")]

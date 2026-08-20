@@ -1,5 +1,5 @@
 {
-  "name": "MacacaGames.RuntimeBugReporter.InputSystem",
+  "name": "MacacaGames.RuntimeBugReporter.SoftwareCursor.InputSystem",
   "rootNamespace": "MacacaGames.RuntimeBugReporter",
   "references": [
     "MacacaGames.RuntimeBugReporter",

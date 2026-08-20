@@ -8,8 +8,13 @@ namespace MacacaGames.RuntimeBugReporter
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
         private static void Install()
         {
-            BugReporterController.SoftwareCursorDeltaReader = ReadDelta;
-            BugReporterController.SoftwareCursorButtonReader = ReadButtonState;
+            if (Mouse.current == null)
+                return;
+
+            SoftwareCursorInputInstaller.Install(
+                ReadDelta,
+                ReadButtonState,
+                SoftwareCursorInputInstaller.InputSystemPriority);
         }
 
         private static Vector2 ReadDelta()
