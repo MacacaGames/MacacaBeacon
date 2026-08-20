@@ -126,6 +126,16 @@ namespace MacacaGames.RuntimeBugReporter
         // Locked mouse delta does not include the desktop cursor's acceleration.
         private const float LockedSoftwareCursorSpeed = 4f;
 
+#if MACACA_BEACON_PRODUCTION || PRODUCTION
+        internal void Initialize(BugReporterSettings value)
+        {
+            // Production builds compile without Beacon runtime, so the controller is never created.
+        }
+
+        internal void RequestOpen()
+        {
+        }
+#else
         internal void Initialize(BugReporterSettings value)
         {
             settings = value;
@@ -140,6 +150,7 @@ namespace MacacaGames.RuntimeBugReporter
                 return;
             StartCoroutine(OpenAfterCapture());
         }
+#endif
 
         internal void Close()
         {
@@ -166,10 +177,16 @@ namespace MacacaGames.RuntimeBugReporter
             status = "";
         }
 
+#if MACACA_BEACON_PRODUCTION || PRODUCTION
+        internal void SetVideoRecordingEnabled(bool enabled)
+        {
+        }
+#else
         internal void SetVideoRecordingEnabled(bool enabled)
         {
             videoRecorder?.SetEnabled(enabled);
         }
+#endif
 
         private void Awake()
         {
@@ -1916,6 +1933,21 @@ namespace MacacaGames.RuntimeBugReporter
             }
         }
 
+#if MACACA_BEACON_PRODUCTION || PRODUCTION
+        private void TryBeginSend()
+        {
+        }
+
+        private IEnumerator RecaptureScreenshot()
+        {
+            yield break;
+        }
+
+        private IEnumerator SendReport()
+        {
+            yield break;
+        }
+#else
         private void TryBeginSend()
         {
             if (isSending || (settings.enableRollingVideo && videoRecorder.IsFinalizing))
@@ -2000,6 +2032,7 @@ namespace MacacaGames.RuntimeBugReporter
                 validationMessage = "";
             }
         }
+#endif
 
         private BugReport BuildReport()
         {

@@ -143,7 +143,7 @@ namespace MacacaGames.RuntimeBugReporter
         public string[] categories = { "Gameplay", "UI", "Visual", "Audio", "Performance", "Other" };
 #endif
 
-#if MACACA_BEACON_PRODUCTION
+#if MACACA_BEACON_PRODUCTION || PRODUCTION
         [Obsolete("Use enableInBuild instead.")]
         public bool enabledInBuild => enableInBuild;
         [Obsolete("Use enableInBuild instead.")]

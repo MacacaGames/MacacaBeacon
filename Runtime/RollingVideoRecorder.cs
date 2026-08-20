@@ -165,6 +165,15 @@ namespace MacacaGames.RuntimeBugReporter
             }
         }
 
+#if MACACA_BEACON_PRODUCTION || PRODUCTION
+        public void Start()
+        {
+        }
+
+        public void SetEnabled(bool enabled)
+        {
+        }
+#else
         public void Start()
         {
             SetEnabled(settings.enableRollingVideo);
@@ -217,6 +226,7 @@ namespace MacacaGames.RuntimeBugReporter
                 StopCapture();
             }
         }
+#endif
 
         private void StartGenericCapture()
         {
@@ -283,6 +293,12 @@ namespace MacacaGames.RuntimeBugReporter
                 MarkIncident(pendingIncident);
         }
 
+#if MACACA_BEACON_PRODUCTION || PRODUCTION
+        public void MarkIncident(Action<VideoCaptureResult> completed)
+        {
+            completed?.Invoke(null);
+        }
+#else
         public void MarkIncident(Action<VideoCaptureResult> completed)
         {
             var diagnosticCompleted = completed;
@@ -331,6 +347,7 @@ namespace MacacaGames.RuntimeBugReporter
             if (settings.secondsAfter <= 0)
                 BeginFinishIncident();
         }
+#endif
 
         private IEnumerator CaptureLoop()
         {
@@ -395,7 +412,9 @@ namespace MacacaGames.RuntimeBugReporter
                         rowsAreBottomUp);
                     frameWidth = nativeSlot.Width;
                     frameHeight = nativeSlot.Height;
+#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
                     goto FrameCaptured;
+#endif
                 }
                 if (nativeFrameRing != null)
                 {
@@ -468,7 +487,9 @@ namespace MacacaGames.RuntimeBugReporter
                     capturedFrame = new VideoCaptureFrame(frame, Time.realtimeSinceStartupAsDouble);
                 }
 
+#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
             FrameCaptured:
+#endif
                 history.Enqueue(capturedFrame);
                 historyBytes += capturedFrame.ByteCount;
                 var historyCutoff = capturedFrame.CapturedAt - Mathf.Max(1, settings.secondsBefore);
