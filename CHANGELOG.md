@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Separated mobile screenshot annotation touches from report-page scrolling so drawing on the screenshot no longer scrolls the form.
+- Scaled the screenshot preview to 0.78x in portrait layouts to keep more of the form visible below it without changing the captured attachment.
+
 ## 0.5.4 - 2026-08-15
 
 - Fixed the native Windows DX11 Beacon hang by isolating Unity's D3D11 capture context from the Media Foundation encoder context with a same-adapter shared keyed-mutex texture and dedicated encoder worker.

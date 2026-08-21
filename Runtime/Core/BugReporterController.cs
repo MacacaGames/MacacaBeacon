@@ -75,6 +75,10 @@ namespace MacacaGames.RuntimeBugReporter
         private int touchScrollId = -1;
         private int touchScrollTarget;
         private Vector2 lastTouchScrollPosition;
+        private int touchAnnotationId = -1;
+        private int touchAnnotationFrame = -1;
+        private Rect screenshotImageScreenRect;
+        private bool screenshotImageRectValid;
         private Rect windowRect;
         private Vector2 softwareCursorPosition;
         private bool softwareCursorInitialized;
@@ -123,6 +127,7 @@ namespace MacacaGames.RuntimeBugReporter
         private const float DesktopLayoutMinimumWidth = 1120f;
         private const float MobileLayoutMaximumWidth = 720f;
         private const float HorizontalAnnotationToolbarMinimumWidth = 620f;
+        private const float PortraitScreenshotPreviewScale = 0.78f;
         // Locked mouse delta does not include the desktop cursor's acceleration.
         private const float LockedSoftwareCursorSpeed = 4f;
 
@@ -174,6 +179,10 @@ namespace MacacaGames.RuntimeBugReporter
             softwareCursorFocusedTextControl = null;
             softwareCursorFocusedTextControlId = 0;
             softwareCursorVideoPreviewTime = null;
+            touchScrollId = -1;
+            touchAnnotationId = -1;
+            touchAnnotationFrame = -1;
+            screenshotImageRectValid = false;
             status = "";
         }
 
@@ -341,6 +350,10 @@ namespace MacacaGames.RuntimeBugReporter
             softwareCursorFocusedTextControl = null;
             softwareCursorFocusedTextControlId = 0;
             softwareCursorVideoPreviewTime = null;
+            touchScrollId = -1;
+            touchAnnotationId = -1;
+            touchAnnotationFrame = -1;
+            screenshotImageRectValid = false;
             SetInputBlocker(true);
             pendingFocusControl = "BugReportTitle";
             status = !videoCaptureCompleted && videoCaptureRequested && settings.secondsAfter > 0
@@ -948,6 +961,19 @@ namespace MacacaGames.RuntimeBugReporter
 
             if (Input.touchCount == 0)
             {
+                if (touchAnnotationId >= 0)
+                    screenshotAnnotator?.EndStroke();
+                touchScrollId = -1;
+                touchAnnotationId = -1;
+                touchAnnotationFrame = -1;
+                return;
+            }
+
+            // A touch that is already drawing owns the gesture for the
+            // screenshot canvas. Do not let a second pass turn the same drag
+            // into page scrolling.
+            if (touchAnnotationId >= 0)
+            {
                 touchScrollId = -1;
                 return;
             }
@@ -956,10 +982,12 @@ namespace MacacaGames.RuntimeBugReporter
             for (var i = 0; i < Input.touchCount; i++)
             {
                 var candidate = Input.GetTouch(i);
-                if (touchScrollId < 0 && candidate.phase == TouchPhase.Began)
+                if (candidate.phase == TouchPhase.Began)
                 {
                     var point = new Vector2(candidate.position.x, Screen.height - candidate.position.y);
-                    if (windowRect.Contains(point))
+                    if (IsScreenshotAnnotationTouch(point))
+                        continue;
+                    if (touchScrollId < 0 && windowRect.Contains(point))
                     {
                         touchScrollId = candidate.fingerId;
                         touchScrollTarget = GetScrollTarget(point);
@@ -1070,6 +1098,15 @@ namespace MacacaGames.RuntimeBugReporter
             return point.x < leftEdge + leftWidth ? 1 : 2;
         }
 
+        private bool IsScreenshotAnnotationTouch(Vector2 point)
+        {
+            return !isSending
+                && screenshotAnnotator != null
+                && screenshotImageRectValid
+                && captureTabIndex == 0
+                && screenshotImageScreenRect.Contains(point);
+        }
+
         private void DrawCompactContent()
         {
             GUILayout.BeginHorizontal();
@@ -1091,6 +1128,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         private void DrawCaptureReviewPanel(float previewWidth, float fallbackHeight)
         {
+            screenshotImageRectValid = false;
             var previousTab = captureTabIndex;
             captureTabIndex = SoftwareCursorSelectionGrid(
                 captureTabIndex,
@@ -1122,12 +1160,14 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.Label(screenshotBytes != null ? "READY" : "UNAVAILABLE", statusStyle);
             GUILayout.EndHorizontal();
 
-            var previewHeight = fallbackHeight;
+            var previewScale = IsPortraitLayout() ? PortraitScreenshotPreviewScale : 1f;
+            var displayPreviewWidth = previewWidth * previewScale;
+            var previewHeight = fallbackHeight * previewScale;
             if (screenshotPreview != null && screenshotPreview.width > 0 && screenshotPreview.height > 0)
             {
                 // Match the preview frame to the captured image so the dark
                 // texture does not create large letterboxed bands around it.
-                previewHeight = previewWidth * screenshotPreview.height / screenshotPreview.width;
+                previewHeight = displayPreviewWidth * screenshotPreview.height / screenshotPreview.width;
             }
             previewHeight = Mathf.Max(160f * styleScale, previewHeight);
             // Keep the preview frame at the captured image size. Expanding
@@ -1136,9 +1176,9 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.BeginHorizontal();
             GUILayout.FlexibleSpace();
             var rect = GUILayoutUtility.GetRect(
-                previewWidth,
+                displayPreviewWidth,
                 previewHeight,
-                GUILayout.Width(previewWidth),
+                GUILayout.Width(displayPreviewWidth),
                 GUILayout.Height(previewHeight));
             GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
@@ -1147,6 +1187,8 @@ namespace MacacaGames.RuntimeBugReporter
             {
                 var imageRect = new Rect(rect.x + 3, rect.y + 3, rect.width - 6, rect.height - 6);
                 var fittedImageRect = FitTextureRect(imageRect, screenshotPreview.width, screenshotPreview.height);
+                screenshotImageScreenRect = ToScreenRect(fittedImageRect);
+                screenshotImageRectValid = true;
                 GUI.DrawTexture(fittedImageRect, screenshotPreview, ScaleMode.StretchToFill, false);
                 if (!isSending && screenshotAnnotator != null)
                     HandleScreenshotAnnotation(fittedImageRect);
@@ -1803,6 +1845,15 @@ namespace MacacaGames.RuntimeBugReporter
                 return;
             }
 
+            // Unity does not reliably surface a mobile finger drag as the
+            // complete IMGUI mouse sequence. Read the touch directly so a
+            // canvas stroke can claim its finger before page scrolling sees it.
+            if (Input.touchCount > 0)
+            {
+                HandleTouchScreenshotAnnotation(ToScreenRect(imageRect));
+                return;
+            }
+
             if (current.type == EventType.MouseDown && current.button == 0 && imageRect.Contains(current.mousePosition))
             {
                 GUIUtility.hotControl = controlId;
@@ -1820,6 +1871,45 @@ namespace MacacaGames.RuntimeBugReporter
                 screenshotAnnotator.EndStroke();
                 GUIUtility.hotControl = 0;
                 current.Use();
+            }
+        }
+
+        private void HandleTouchScreenshotAnnotation(Rect screenRect)
+        {
+            if (Event.current.type != EventType.Repaint || touchAnnotationFrame == Time.frameCount)
+                return;
+
+            touchAnnotationFrame = Time.frameCount;
+            for (var i = 0; i < Input.touchCount; i++)
+            {
+                var touch = Input.GetTouch(i);
+                var point = new Vector2(touch.position.x, Screen.height - touch.position.y);
+                if (touchAnnotationId < 0)
+                {
+                    if (touch.phase != TouchPhase.Began || !screenRect.Contains(point))
+                        continue;
+
+                    touchAnnotationId = touch.fingerId;
+                    touchScrollId = -1;
+                    touchScrollTarget = 0;
+                    screenshotAnnotator.BeginStroke(
+                        ToNormalizedPoint(screenRect, point),
+                        SelectedAnnotationColor(),
+                        SelectedBrushRadius());
+                    continue;
+                }
+
+                if (touch.fingerId != touchAnnotationId)
+                    continue;
+
+                if (touch.phase == TouchPhase.Moved)
+                    screenshotAnnotator.AddPoint(ToNormalizedPoint(screenRect, point));
+                else if (touch.phase == TouchPhase.Ended || touch.phase == TouchPhase.Canceled)
+                {
+                    screenshotAnnotator.AddPoint(ToNormalizedPoint(screenRect, point));
+                    screenshotAnnotator.EndStroke();
+                    touchAnnotationId = -1;
+                }
             }
         }
 
@@ -1845,6 +1935,16 @@ namespace MacacaGames.RuntimeBugReporter
             return new Vector2(
                 Mathf.Clamp01((point.x - rect.x) / Mathf.Max(1f, rect.width)),
                 Mathf.Clamp01((point.y - rect.y) / Mathf.Max(1f, rect.height)));
+        }
+
+        private static Rect ToScreenRect(Rect rect)
+        {
+            return new Rect(GUIUtility.GUIToScreenPoint(rect.position), rect.size);
+        }
+
+        private bool IsPortraitLayout()
+        {
+            return windowRect.height > windowRect.width;
         }
 
         private static Rect FitTextureRect(Rect bounds, int textureWidth, int textureHeight)
