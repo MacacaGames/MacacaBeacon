@@ -9,6 +9,7 @@ namespace MacacaGames.RuntimeBugReporter
         private static readonly List<IBugReportDataProvider> Providers = new List<IBugReportDataProvider>();
         internal static IBugReportTransport TransportOverride;
         internal static IVideoEncoderBackend VideoEncoderOverride;
+        internal static IBugReporterPauseHandler PauseHandlerOverride { get; private set; }
         internal static bool SoftwareCursorEnabled { get; private set; } = true;
         internal static bool HandheldModeEnabled { get; private set; }
 
@@ -94,6 +95,12 @@ namespace MacacaGames.RuntimeBugReporter
         public static void SetTransport(IBugReportTransport transport) => TransportOverride = transport;
 
         /// <summary>
+        /// Registers the host-provided pause implementation used when settings.pauseMode is Custom.
+        /// Pass null to remove the handler. The handler must remain registered until the reporter closes.
+        /// </summary>
+        public static void SetPauseHandler(IBugReporterPauseHandler handler) => PauseHandlerOverride = handler;
+
+        /// <summary>
         /// Registers a project-specific runtime encoder, for example a MediaCodec or Media Foundation backend.
         /// Pass null to restore the package's platform default.
         /// </summary>
@@ -123,6 +130,7 @@ namespace MacacaGames.RuntimeBugReporter
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
         private static void ResetSessionState()
         {
+            PauseHandlerOverride = null;
             SoftwareCursorEnabled = true;
             HandheldModeEnabled = false;
         }

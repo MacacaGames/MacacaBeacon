@@ -66,6 +66,9 @@ namespace MacacaGames.RuntimeBugReporter
         private int categoryIndex;
         private bool isOpening;
         private bool isSending;
+        private bool pauseAcquired;
+        private BugReporterPauseMode activePauseMode;
+        private IBugReporterPauseHandler activePauseHandler;
         private string status = "";
         private bool statusIsError;
         private string validationMessage = "";
@@ -153,6 +156,8 @@ namespace MacacaGames.RuntimeBugReporter
         {
             if (settings == null || IsOpen || isOpening)
                 return;
+            if (!TryAcquirePause())
+                return;
             StartCoroutine(OpenAfterCapture());
         }
 #endif
@@ -184,6 +189,7 @@ namespace MacacaGames.RuntimeBugReporter
             touchAnnotationFrame = -1;
             screenshotImageRectValid = false;
             status = "";
+            ReleasePause();
         }
 
 #if MACACA_BEACON_PRODUCTION || PRODUCTION
@@ -210,6 +216,7 @@ namespace MacacaGames.RuntimeBugReporter
         private void OnDestroy()
         {
             if (Instance == this) Instance = null;
+            ReleasePause();
             ResetVideoPreview();
             if (videoPlayer != null)
             {
@@ -361,6 +368,78 @@ namespace MacacaGames.RuntimeBugReporter
                 : HasVideoCaptureFile(videoCapture)
                     ? videoCapture.Extension.TrimStart('.').ToUpperInvariant() + " video ready (" + videoCapture.DurationSeconds.ToString("0.0") + "s)."
                     : "Ready to send.";
+        }
+
+        private bool TryAcquirePause()
+        {
+            if (pauseAcquired)
+                return true;
+
+            activePauseMode = settings.pauseMode;
+            switch (activePauseMode)
+            {
+                case BugReporterPauseMode.None:
+                    pauseAcquired = true;
+                    return true;
+
+                case BugReporterPauseMode.TimeScale:
+                    activePauseHandler = new TimeScaleBugReporterPauseHandler();
+                    break;
+
+                case BugReporterPauseMode.Custom:
+                    activePauseHandler = BugReporter.PauseHandlerOverride;
+                    if (activePauseHandler == null)
+                    {
+                        Debug.LogError("[Macaca Beacon] Pause mode is Custom, but no IBugReporterPauseHandler has been registered.");
+                        return false;
+                    }
+                    break;
+
+                default:
+                    Debug.LogError("[Macaca Beacon] Unsupported pause mode: " + activePauseMode);
+                    return false;
+            }
+
+            try
+            {
+                activePauseHandler.Pause();
+                pauseAcquired = true;
+                return true;
+            }
+            catch (Exception exception)
+            {
+                try
+                {
+                    activePauseHandler.Resume();
+                }
+                catch (Exception resumeException)
+                {
+                    Debug.LogError("[Macaca Beacon] Pause rollback failed: " + resumeException);
+                }
+                activePauseHandler = null;
+                Debug.LogError("[Macaca Beacon] Pause handler failed: " + exception);
+                return false;
+            }
+        }
+
+        private void ReleasePause()
+        {
+            if (!pauseAcquired)
+                return;
+
+            var handler = activePauseHandler;
+            pauseAcquired = false;
+            activePauseHandler = null;
+            activePauseMode = BugReporterPauseMode.None;
+
+            try
+            {
+                handler?.Resume();
+            }
+            catch (Exception exception)
+            {
+                Debug.LogError("[Macaca Beacon] Pause release failed: " + exception);
+            }
         }
 
         private void OnGUI()

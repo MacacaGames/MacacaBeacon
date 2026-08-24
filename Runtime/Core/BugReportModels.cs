@@ -68,6 +68,16 @@ namespace MacacaGames.RuntimeBugReporter
         void Collect(BugReport report);
     }
 
+    /// <summary>
+    /// Owns pausing and resuming the host game's gameplay while the reporter is open.
+    /// Register a handler before calling BugReporter.Open when the settings use Custom mode.
+    /// </summary>
+    public interface IBugReporterPauseHandler
+    {
+        void Pause();
+        void Resume();
+    }
+
     public interface IBugReportTransport
     {
         System.Collections.IEnumerator Send(BugReport report, Action<BugReportSendResult> completed);

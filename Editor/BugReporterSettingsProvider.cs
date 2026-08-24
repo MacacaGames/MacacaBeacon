@@ -52,6 +52,9 @@ namespace MacacaGames.RuntimeBugReporter.Editor
             EditorGUILayout.PropertyField(Property("shortcut"));
             EditorGUILayout.PropertyField(Property("allowEscapeToClose"));
 
+            Section("Pause");
+            EditorGUILayout.PropertyField(Property("pauseMode"));
+
             Section("Appearance");
             var fullscreen = Property("fullscreen");
             EditorGUILayout.PropertyField(fullscreen);

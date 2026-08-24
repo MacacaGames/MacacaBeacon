@@ -38,7 +38,7 @@
 
 ## 軟體游標與掌機
 
-桌面遊戲若在 BugReporter 開啟期間隱藏或鎖定 Unity Cursor，回報頁面會用 IMGUI 繪製自己的軟體游標，並以同一位置處理 hover、點擊、拖曳、頁面 Scrollbar、截圖標注與影片 seek。專案有安裝 Input System 時，locked 模式會透過條件式 adapter 讀取 `Mouse.current.delta`；未安裝時仍可編譯並使用 IMGUI delta fallback。BugReporter 不會寫入或還原 `Cursor.visible`／`Cursor.lockState`，也不會暫停遊戲或攔截專案直接讀取的滑鼠輸入。
+桌面遊戲若在 BugReporter 開啟期間隱藏或鎖定 Unity Cursor，回報頁面會用 IMGUI 繪製自己的軟體游標，並以同一位置處理 hover、點擊、拖曳、頁面 Scrollbar、截圖標注與影片 seek。專案有安裝 Input System 時，locked 模式會透過條件式 adapter 讀取 `Mouse.current.delta`；未安裝時仍可編譯並使用 IMGUI delta fallback。BugReporter 不會寫入或還原 `Cursor.visible`／`Cursor.lockState`，是否暫停遊戲則由 `Pause Mode` 設定決定。
 
 iOS／Android、Unity 回報為 `DeviceType.Handheld` 或 `DeviceType.Console` 的裝置不會啟用桌面軟體游標。Steam Deck 等可能被 Unity 分類為 Desktop 的掌機，由宿主使用既有平台層判斷後啟用 Handheld Mode。它會改用 Mobile Entry Button 尺寸、隱藏 EntryButton 旁的鍵盤 Shortcut，並停用桌面軟體游標；實際鍵盤快捷鍵仍可使用。這個呼叫不會建立 BugReporter controller，也不會讓套件相依 Steamworks：
 
@@ -50,6 +50,36 @@ BugReporter.SetHandheldMode(true);
 ```
 
 Steam 專案可以在自己的 Steamworks 初始化完成後，以 `SteamUtils.IsSteamRunningOnSteamDeck()` 的結果設定 Handheld Mode；Macaca Beacon 本身不引用或封裝 Steamworks。若只想個別控制軟體游標，仍可使用 `BugReporter.SetSoftwareCursorEnabled(...)`。
+
+## 遊戲暫停模式
+
+`Pause Mode` 控制回報頁面開啟期間的遊戲背景行為：
+
+- `None`：維持 Beacon 原本行為，不主動暫停遊戲。
+- `TimeScale`：使用內建的 `TimeScaleBugReporterPauseHandler`，保存原本的 `Time.timeScale`，開啟回報時設為 `0`，關閉或送出成功後還原。
+- `Custom`：由宿主實作 `IBugReporterPauseHandler`，並在呼叫 `BugReporter.Open()` 前註冊。若未註冊，Beacon 不會開啟回報頁面。
+
+```csharp
+using MacacaGames.RuntimeBugReporter;
+
+public sealed class GamePauseHandler : IBugReporterPauseHandler
+{
+    public void Pause()
+    {
+        // Pause the project's gameplay, input, timers, or other systems here.
+    }
+
+    public void Resume()
+    {
+        // Restore the project's gameplay state here.
+    }
+}
+
+// Register during game initialization when Pause Mode is Custom.
+BugReporter.SetPauseHandler(new GamePauseHandler());
+```
+
+`TimeScale` 只會影響依賴 scaled time 的遊戲邏輯；使用 unscaled time、一般 `Update()` 直接執行副作用、音效或自訂背景工作時，應改用 `Custom`。
 
 ## Slack 設定
 

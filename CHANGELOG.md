@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added configurable gameplay pause modes: None, TimeScale (default, implemented by `TimeScaleBugReporterPauseHandler`), and Custom via `IBugReporterPauseHandler`.
 - Separated mobile screenshot annotation touches from report-page scrolling so drawing on the screenshot no longer scrolls the form.
 - Scaled the screenshot preview to 0.78x in portrait layouts to keep more of the form visible below it without changing the captured attachment.
 

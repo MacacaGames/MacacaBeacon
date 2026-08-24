@@ -12,6 +12,13 @@ namespace MacacaGames.RuntimeBugReporter
         BottomRight
     }
 
+    public enum BugReporterPauseMode
+    {
+        None = 0,
+        TimeScale = 1,
+        Custom = 2
+    }
+
     [Obsolete("Use EntryButtonCorner instead.")]
     public enum MobileEntryCorner
     {
@@ -33,6 +40,7 @@ namespace MacacaGames.RuntimeBugReporter
         public bool enableInBuild => false;
         public KeyCode shortcut => KeyCode.None;
         public bool allowEscapeToClose => false;
+        public BugReporterPauseMode pauseMode => BugReporterPauseMode.None;
         public bool fullscreen => false;
         public float backdropOpacity => 0f;
         public float interfaceScale => 1f;
@@ -75,6 +83,10 @@ namespace MacacaGames.RuntimeBugReporter
         public bool enableInBuild = true;
         public KeyCode shortcut = KeyCode.F6;
         public bool allowEscapeToClose = true;
+
+        [Header("Pause")]
+        [Tooltip("None keeps the current behavior. TimeScale sets Time.timeScale to 0 while the reporter is open. Custom requires an IBugReporterPauseHandler registered through BugReporter.SetPauseHandler.")]
+        public BugReporterPauseMode pauseMode = BugReporterPauseMode.TimeScale;
 
         [Header("Appearance")]
         [Tooltip("Use the entire Game View for the report form. Disable this to use a centered desktop window.")]
