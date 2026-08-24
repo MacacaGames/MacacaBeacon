@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Added configurable gameplay pause modes: None, TimeScale (default, implemented by `TimeScaleBugReporterPauseHandler`), and Custom via `IBugReporterPauseHandler`.
+- Added independent Collect Actions: F6 Report Now, F7 Capture to Draft, and F8 Draft Inbox, with session-local editable incident drafts and batch sending.
+- Kept draft editing as save/back only, centralized batch sending in Draft Inbox, blocked sending until every draft has a title and description, and cleared all drafts when the game ends.
+- Added an opt-in `Pause When Opening Draft Inbox` setting that reuses the configured pause handler while the inbox and draft editor are open.
 - Separated mobile screenshot annotation touches from report-page scrolling so drawing on the screenshot no longer scrolls the form.
 - Scaled the screenshot preview to 0.78x in portrait layouts to keep more of the form visible below it without changing the captured attachment.
 

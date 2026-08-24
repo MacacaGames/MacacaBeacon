@@ -66,9 +66,17 @@ namespace MacacaGames.RuntimeBugReporter
         private int categoryIndex;
         private bool isOpening;
         private bool isSending;
+        private bool isCapturingDraft;
+        private bool isDraftInbox;
         private bool pauseAcquired;
         private BugReporterPauseMode activePauseMode;
         private IBugReporterPauseHandler activePauseHandler;
+        private string activeDraftDirectory;
+        private DraftReportManifest activeDraftManifest;
+        private DraftReportManifest[] draftManifests = new DraftReportManifest[0];
+        private string toastMessage;
+        private float toastUntil;
+        private bool isQuitting;
         private string status = "";
         private bool statusIsError;
         private string validationMessage = "";
@@ -101,6 +109,8 @@ namespace MacacaGames.RuntimeBugReporter
         private GUIStyle fieldStyle;
         private GUIStyle areaStyle;
         private GUIStyle cardStyle;
+        private GUIStyle completeDraftCardStyle;
+        private GUIStyle readyBadgeStyle;
         private GUIStyle buttonStyle;
         private GUIStyle categoryStyle;
         private GUIStyle primaryButtonStyle;
@@ -143,6 +153,14 @@ namespace MacacaGames.RuntimeBugReporter
         internal void RequestOpen()
         {
         }
+
+        internal void RequestCaptureToDraft()
+        {
+        }
+
+        internal void RequestOpenDraftInbox()
+        {
+        }
 #else
         internal void Initialize(BugReporterSettings value)
         {
@@ -160,17 +178,47 @@ namespace MacacaGames.RuntimeBugReporter
                 return;
             StartCoroutine(OpenAfterCapture());
         }
+
+        internal void RequestCaptureToDraft()
+        {
+            if (settings == null || IsOpen || isOpening || isCapturingDraft)
+                return;
+            StartCoroutine(CaptureIncidentToDraft());
+        }
+
+        internal void RequestOpenDraftInbox()
+        {
+            if (settings == null || IsOpen || isOpening || isCapturingDraft)
+                return;
+            if (settings.pauseWhenOpeningDraftInbox && !TryAcquirePause())
+                return;
+            RefreshDrafts();
+            isDraftInbox = true;
+            IsOpen = true;
+            SetInputBlocker(true);
+            status = "";
+            statusIsError = false;
+        }
 #endif
 
         internal void Close()
         {
             if (!IsOpen || isSending)
                 return;
+            if (!string.IsNullOrEmpty(activeDraftDirectory))
+            {
+                ReturnToDraftInbox();
+                return;
+            }
             IsOpen = false;
             SetInputBlocker(false);
             ResetVideoPreview();
-            videoCapture?.DeleteFile();
+            if (string.IsNullOrEmpty(activeDraftDirectory))
+                videoCapture?.DeleteFile();
             videoCapture = null;
+            activeDraftDirectory = null;
+            activeDraftManifest = null;
+            isDraftInbox = false;
             captureTabIndex = 0;
             includeScreenshotInReport = false;
             includeVideoInReport = false;
@@ -216,6 +264,8 @@ namespace MacacaGames.RuntimeBugReporter
         private void OnDestroy()
         {
             if (Instance == this) Instance = null;
+            if (!isQuitting && !string.IsNullOrEmpty(activeDraftDirectory))
+                SaveActiveDraft();
             ReleasePause();
             ResetVideoPreview();
             if (videoPlayer != null)
@@ -224,7 +274,8 @@ namespace MacacaGames.RuntimeBugReporter
                 videoPlayer.frameReady -= OnVideoFirstFrameReady;
                 videoPlayer.errorReceived -= OnVideoError;
             }
-            videoCapture?.DeleteFile();
+            if (string.IsNullOrEmpty(activeDraftDirectory))
+                videoCapture?.DeleteFile();
             videoCapture = null;
             logs?.Dispose();
             videoRecorder?.Dispose();
@@ -232,6 +283,12 @@ namespace MacacaGames.RuntimeBugReporter
                 Destroy(inputBlocker);
             if (screenshotPreview != null) Destroy(screenshotPreview);
             ReleaseStyleTextures();
+        }
+
+        private void OnApplicationQuit()
+        {
+            isQuitting = true;
+            DraftReportArchive.DiscardAll();
         }
 
         private void Update()
@@ -370,6 +427,64 @@ namespace MacacaGames.RuntimeBugReporter
                     : "Ready to send.";
         }
 
+        private IEnumerator CaptureIncidentToDraft()
+        {
+            isCapturingDraft = true;
+            var report = BuildIncidentSnapshot();
+            var screenshotBytesAtIncident = (byte[])null;
+            var screenshotDone = !settings.includeScreenshot;
+            var videoDone = !settings.enableRollingVideo || videoRecorder == null || !videoRecorder.IsEnabled;
+            VideoCaptureResult videoAtIncident = null;
+
+            if (settings.enableRollingVideo && videoRecorder != null && videoRecorder.IsEnabled)
+            {
+                videoRecorder.MarkIncident(result =>
+                {
+                    videoAtIncident = result;
+                    videoDone = true;
+                });
+            }
+
+            if (settings.includeScreenshot)
+            {
+                yield return CaptureUtility.CapturePng((bytes, texture) =>
+                {
+                    screenshotBytesAtIncident = bytes;
+                    screenshotDone = true;
+                    if (texture != null)
+                        Destroy(texture);
+                });
+            }
+
+            while (!screenshotDone || !videoDone)
+                yield return null;
+
+            if (DefaultScreenshotInclusion(screenshotBytesAtIncident))
+            {
+                AddAttachmentIfAllowed(
+                    report,
+                    new BugReportAttachment("bug-" + report.Id + ".png", "image/png", screenshotBytesAtIncident, "Game screenshot at incident time"));
+            }
+            if (HasVideoCaptureFile(videoAtIncident))
+            {
+                var videoAttachment = BugReportAttachment.FromFile(
+                    "bug-" + report.Id + videoAtIncident.Extension,
+                    videoAtIncident.MimeType,
+                    videoAtIncident.FilePath,
+                    "Gameplay around incident time");
+                videoAttachment.DeleteSourceAfterStaging = true;
+                AddAttachmentIfAllowed(report, videoAttachment);
+            }
+
+            string directory;
+            string error;
+            if (DraftReportArchive.TryStage(report, settings.maximumRetainedDrafts, out directory, out error))
+                ShowToast("Issue captured · Drafts " + DraftReportArchive.LoadAll().Length);
+            else
+                ShowToast("Could not save draft: " + error);
+            isCapturingDraft = false;
+        }
+
         private bool TryAcquirePause()
         {
             if (pauseAcquired)
@@ -442,19 +557,53 @@ namespace MacacaGames.RuntimeBugReporter
             }
         }
 
+        private void ShowToast(string message)
+        {
+            toastMessage = message;
+            toastUntil = Time.unscaledTime + 3f;
+        }
+
+        private void DrawToast()
+        {
+            if (string.IsNullOrEmpty(toastMessage) || Time.unscaledTime >= toastUntil)
+            {
+                toastMessage = null;
+                return;
+            }
+
+            var width = Mathf.Min(440f, Screen.width - 32f);
+            var height = 54f;
+            var rect = new Rect(Screen.width - width - 16f, Screen.height - height - 24f, width, height);
+            GUI.Box(rect, toastMessage, GUI.skin.box);
+        }
+
         private void OnGUI()
         {
             if (settings == null)
                 return;
 
             var current = Event.current;
-            if (current.type == EventType.KeyDown && current.keyCode == settings.shortcut)
+            if (current.type == EventType.KeyDown && current.keyCode == settings.captureShortcut)
+            {
+                if (!IsOpen && !isOpening)
+                    RequestCaptureToDraft();
+                current.Use();
+            }
+            else if (current.type == EventType.KeyDown && current.keyCode == settings.draftInboxShortcut)
+            {
+                if (!IsOpen && !isOpening)
+                    RequestOpenDraftInbox();
+                current.Use();
+            }
+            else if (current.type == EventType.KeyDown && current.keyCode == settings.shortcut)
             {
                 if (IsOpen) Close(); else RequestOpen();
                 current.Use();
             }
             if (!IsOpen && !isOpening && settings.showEntryButton)
                 DrawEntryButton();
+            if (!IsOpen && !isOpening)
+                DrawToast();
             if (!IsOpen)
                 return;
 
@@ -497,7 +646,10 @@ namespace MacacaGames.RuntimeBugReporter
 
             if (current.type == EventType.KeyDown && current.keyCode == KeyCode.Return && (current.control || current.command))
             {
-                TryBeginSend();
+                if (!string.IsNullOrEmpty(activeDraftDirectory))
+                    ReturnToDraftInbox();
+                else
+                    TryBeginSend();
                 current.Use();
             }
 
@@ -848,14 +1000,17 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.BeginHorizontal();
             GUILayout.Space(28 * styleScale);
             GUILayout.BeginVertical();
-            GUILayout.Label(settings.reportTitle, titleStyle);
-            GUILayout.Label("Capture the moment. Signal the issue.", subtitleStyle);
+            GUILayout.Label(isDraftInbox ? "DRAFT INBOX" : settings.reportTitle, titleStyle);
+            GUILayout.Label(isDraftInbox ? "Review captured incidents when it is safe to stop." : "Capture the moment. Signal the issue.", subtitleStyle);
             GUILayout.EndVertical();
             GUILayout.FlexibleSpace();
             if (!IsMobileLayout())
-                GUILayout.Label(settings.shortcut + "  toggle", hintStyle, GUILayout.Width(88 * styleScale));
+                GUILayout.Label(
+                    (isDraftInbox ? settings.draftInboxShortcut : settings.shortcut) + (isDraftInbox ? "  inbox" : "  report"),
+                    hintStyle,
+                    GUILayout.Width(110 * styleScale));
             GUI.enabled = !isSending;
-            if (SoftwareCursorButton("CLOSE", closeButtonStyle, GUILayout.Width(82 * styleScale), GUILayout.Height(44 * styleScale)))
+            if (SoftwareCursorButton(!string.IsNullOrEmpty(activeDraftDirectory) ? "BACK" : "CLOSE", closeButtonStyle, GUILayout.Width(82 * styleScale), GUILayout.Height(44 * styleScale)))
                 Close();
             GUI.enabled = true;
             GUILayout.Space(28 * styleScale);
@@ -866,7 +1021,11 @@ namespace MacacaGames.RuntimeBugReporter
             var footerHeight = 86f * styleScale;
             var contentHeight = Mathf.Max(220f, windowRect.height - contentTop - footerHeight);
             GUILayout.BeginArea(new Rect(0f, contentTop, windowRect.width, contentHeight));
-            if (CanUseDesktopLayout())
+            if (isDraftInbox)
+            {
+                DrawDraftInboxContent();
+            }
+            else if (CanUseDesktopLayout())
             {
                 DrawDesktopContent();
             }
@@ -875,6 +1034,18 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.EndArea();
 
             GUILayout.BeginArea(new Rect(0f, windowRect.height - footerHeight, windowRect.width, footerHeight));
+            if (isDraftInbox)
+                DrawDraftInboxFooter();
+            else if (!string.IsNullOrEmpty(activeDraftDirectory))
+                DrawDraftEditorFooter();
+            else
+                DrawReportFooter();
+            GUILayout.EndArea();
+            GUILayout.EndVertical();
+        }
+
+        private void DrawReportFooter()
+        {
             GUILayout.BeginHorizontal();
             var footerPadding = IsMobileLayout() ? 12f * styleScale : 28f * styleScale;
             var videoPending = settings.enableRollingVideo && videoRecorder.IsFinalizing;
@@ -911,8 +1082,275 @@ namespace MacacaGames.RuntimeBugReporter
             GUI.enabled = true;
             GUILayout.Space(footerPadding);
             GUILayout.EndHorizontal();
-            GUILayout.EndArea();
+        }
+
+        private void DrawDraftEditorFooter()
+        {
+            GUILayout.BeginHorizontal();
+            var footerPadding = IsMobileLayout() ? 12f * styleScale : 28f * styleScale;
+            GUILayout.Space(footerPadding);
+            if (SoftwareCursorButton("BACK TO INBOX", buttonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(150 * styleScale)))
+                ReturnToDraftInbox();
+            GUI.enabled = !isSending;
+            GUILayout.FlexibleSpace();
+            if (SoftwareCursorButton("SAVE & BACK", primaryButtonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(160 * styleScale)))
+                ReturnToDraftInbox();
+            GUI.enabled = true;
+            GUILayout.Space(footerPadding);
+            GUILayout.EndHorizontal();
+        }
+
+        private void DrawDraftInboxFooter()
+        {
+            GUILayout.BeginHorizontal();
+            var footerPadding = IsMobileLayout() ? 12f * styleScale : 28f * styleScale;
+            var incompleteCount = CountIncompleteDrafts(draftManifests);
+            var canSend = !isSending && draftManifests.Length > 0 && incompleteCount == 0;
+            GUILayout.Space(footerPadding);
+            if (SoftwareCursorButton("CLOSE", buttonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(120 * styleScale)))
+                Close();
+            GUI.enabled = true;
+            GUILayout.FlexibleSpace();
+            if (incompleteCount > 0)
+                GUILayout.Label(incompleteCount + " draft(s) need title and description", hintStyle);
+            GUI.enabled = canSend;
+            if (SoftwareCursorButton(isSending ? "SENDING…" : "SEND ALL READY", primaryButtonStyle, GUILayout.Height(48 * styleScale), GUILayout.Width(190 * styleScale)))
+                StartCoroutine(SendAllDrafts());
+            GUI.enabled = true;
+            GUILayout.Space(footerPadding);
+            GUILayout.EndHorizontal();
+        }
+
+        private void DrawDraftInboxContent()
+        {
+            GUILayout.BeginVertical();
+            GUILayout.Space(18f * styleScale);
+            GUILayout.BeginHorizontal();
+            GUILayout.Space(28f * styleScale);
+            GUILayout.Label("DRAFT REPORTS  (" + draftManifests.Length + ")", subtitleStyle);
+            GUILayout.FlexibleSpace();
+            GUILayout.Label("F7 capture  ·  F6 report now", hintStyle);
+            GUILayout.Space(28f * styleScale);
+            GUILayout.EndHorizontal();
+            GUILayout.Space(14f * styleScale);
+
+            contentScroll = GUILayout.BeginScrollView(contentScroll, false, true, GUILayout.ExpandHeight(true));
+            GUILayout.Space(28f * styleScale);
+            if (draftManifests.Length == 0)
+            {
+                GUILayout.BeginVertical(cardStyle, GUILayout.ExpandWidth(true));
+                GUILayout.Label("No captured incidents yet.", labelStyle);
+                GUILayout.Label("Press " + settings.captureShortcut + " while playing to save an incident without pausing.", hintStyle);
+                GUILayout.EndVertical();
+            }
+            else
+            {
+                for (var index = 0; index < draftManifests.Length; index++)
+                {
+                    var draft = draftManifests[index];
+                    var complete = IsDraftComplete(draft);
+                    GUILayout.BeginVertical(complete ? completeDraftCardStyle : cardStyle, GUILayout.ExpandWidth(true));
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label(FormatDraftDate(draft.createdUtc) + "  ·  " + (draft.category ?? "Other"), subtitleStyle);
+                    GUILayout.FlexibleSpace();
+                    if (complete)
+                        GUILayout.Label("READY", readyBadgeStyle, GUILayout.Width(82f * styleScale), GUILayout.Height(30f * styleScale));
+                    GUI.enabled = !isSending;
+                    if (SoftwareCursorButton("EDIT", buttonStyle, GUILayout.Height(40f * styleScale), GUILayout.Width(96f * styleScale)))
+                    {
+                        OpenDraftAt(index);
+                        GUI.enabled = true;
+                        GUILayout.EndHorizontal();
+                        GUILayout.EndVertical();
+                        break;
+                    }
+                    if (SoftwareCursorButton("DELETE", closeButtonStyle, GUILayout.Height(40f * styleScale), GUILayout.Width(104f * styleScale)))
+                    {
+                        DeleteDraftAt(index);
+                        GUI.enabled = true;
+                        GUILayout.EndHorizontal();
+                        GUILayout.EndVertical();
+                        break;
+                    }
+                    GUI.enabled = true;
+                    GUILayout.EndHorizontal();
+                    GUILayout.Label(string.IsNullOrWhiteSpace(draft.title) ? "Untitled incident" : draft.title, labelStyle);
+                    if (!complete)
+                        GUILayout.Label("Needs title and description", hintStyle);
+                    GUILayout.Label(BuildDraftAttachmentSummary(draft), hintStyle);
+                    if (!string.IsNullOrEmpty(draft.lastError))
+                        GUILayout.Label("Last send failed: " + draft.lastError, validationStyle);
+                    GUILayout.EndVertical();
+                    GUILayout.Space(12f * styleScale);
+                }
+            }
+            GUILayout.Space(28f * styleScale);
+            GUILayout.EndScrollView();
             GUILayout.EndVertical();
+        }
+
+        private static string FormatDraftDate(string value)
+        {
+            DateTime parsed;
+            return DateTime.TryParse(value, null, System.Globalization.DateTimeStyles.RoundtripKind, out parsed)
+                ? parsed.ToLocalTime().ToString("yyyy-MM-dd HH:mm")
+                : value ?? "Unknown time";
+        }
+
+        private static string BuildDraftAttachmentSummary(DraftReportManifest draft)
+        {
+            var screenshot = false;
+            var video = false;
+            var diagnostics = false;
+            foreach (var attachment in draft.attachments ?? new DraftAttachmentManifest[0])
+            {
+                if (string.Equals(attachment.kind, "screenshot", StringComparison.OrdinalIgnoreCase)) screenshot = true;
+                if (string.Equals(attachment.kind, "video", StringComparison.OrdinalIgnoreCase)) video = true;
+                if (string.Equals(attachment.kind, "attachment", StringComparison.OrdinalIgnoreCase)
+                    && (attachment.fileName ?? "").StartsWith("diagnostics-", StringComparison.OrdinalIgnoreCase)) diagnostics = true;
+            }
+            return "Screenshot " + (screenshot ? "✓" : "—") + "  ·  Video " + (video ? "✓" : "—") + "  ·  Logs " + (diagnostics ? "✓" : "—");
+        }
+
+        private void RefreshDrafts()
+        {
+            draftManifests = DraftReportArchive.LoadAll();
+        }
+
+        private void OpenDraftAt(int index)
+        {
+            if (index < 0 || index >= draftManifests.Length)
+                return;
+            var selected = draftManifests[index];
+            string directory;
+            if (!DraftReportArchive.TryFindDirectory(selected.id, out directory))
+            {
+                RefreshDrafts();
+                return;
+            }
+
+            DraftReportManifest manifest;
+            BugReport report;
+            byte[] loadedScreenshot;
+            VideoCaptureResult loadedVideo;
+            string error;
+            if (!DraftReportArchive.TryLoad(directory, out manifest, out report, out loadedScreenshot, out loadedVideo, out error))
+            {
+                statusIsError = true;
+                status = "Could not open draft: " + error;
+                return;
+            }
+
+            ResetVideoPreview();
+            videoCapture = loadedVideo;
+            videoCaptureRequested = loadedVideo != null;
+            videoCaptureCompleted = true;
+            screenshotBytes = loadedScreenshot;
+            if (screenshotPreview != null)
+                Destroy(screenshotPreview);
+            screenshotPreview = null;
+            screenshotAnnotator = null;
+            if (loadedScreenshot != null && loadedScreenshot.Length > 0)
+            {
+                screenshotPreview = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                if (!ImageConversion.LoadImage(screenshotPreview, loadedScreenshot, false))
+                {
+                    Destroy(screenshotPreview);
+                    screenshotPreview = null;
+                }
+                else
+                    screenshotAnnotator = new ScreenshotAnnotator(screenshotPreview);
+            }
+
+            activeDraftDirectory = directory;
+            activeDraftManifest = manifest;
+            isDraftInbox = false;
+            title = report.Title ?? "";
+            description = report.Description ?? "";
+            reporter = report.Reporter ?? "";
+            categoryIndex = FindCategoryIndex(report.Category);
+            includeScreenshotInReport = IsDraftAttachmentIncluded(manifest, "screenshot");
+            includeVideoInReport = IsDraftAttachmentIncluded(manifest, "video");
+            validationMessage = "";
+            statusIsError = !string.IsNullOrEmpty(manifest.lastError);
+            status = statusIsError ? "Previous send failed: " + manifest.lastError : "Draft loaded.";
+            pendingFocusControl = "BugReportTitle";
+        }
+
+        private bool ReturnToDraftInbox()
+        {
+            if (!string.IsNullOrEmpty(activeDraftDirectory) && !SaveActiveDraft())
+            {
+                statusIsError = true;
+                return false;
+            }
+            ResetVideoPreview();
+            videoCapture = null;
+            screenshotBytes = null;
+            if (screenshotPreview != null)
+                Destroy(screenshotPreview);
+            screenshotPreview = null;
+            screenshotAnnotator = null;
+            activeDraftDirectory = null;
+            activeDraftManifest = null;
+            isDraftInbox = true;
+            IsOpen = true;
+            SetInputBlocker(true);
+            validationMessage = "";
+            status = "";
+            statusIsError = false;
+            RefreshDrafts();
+            return true;
+        }
+
+        private int FindCategoryIndex(string category)
+        {
+            var categories = SafeCategories();
+            for (var index = 0; index < categories.Length; index++)
+            {
+                if (string.Equals(categories[index], category, StringComparison.Ordinal))
+                    return index;
+            }
+            return Mathf.Max(0, categories.Length - 1);
+        }
+
+        private static bool IsDraftAttachmentIncluded(DraftReportManifest manifest, string kind)
+        {
+            foreach (var attachment in manifest.attachments ?? new DraftAttachmentManifest[0])
+            {
+                if (string.Equals(attachment.kind, kind, StringComparison.OrdinalIgnoreCase))
+                    return attachment.included;
+            }
+            return false;
+        }
+
+        private void DeleteDraftAt(int index)
+        {
+            if (index < 0 || index >= draftManifests.Length)
+                return;
+            string directory;
+            if (DraftReportArchive.TryFindDirectory(draftManifests[index].id, out directory))
+                DraftReportArchive.Discard(directory);
+            RefreshDrafts();
+            ShowToast("Draft deleted.");
+        }
+
+        private static int CountIncompleteDrafts(DraftReportManifest[] drafts)
+        {
+            var incomplete = 0;
+            foreach (var draft in drafts ?? new DraftReportManifest[0])
+            {
+                if (!IsDraftComplete(draft))
+                    incomplete++;
+            }
+            return incomplete;
+        }
+
+        private static bool IsDraftComplete(DraftReportManifest draft)
+        {
+            return draft != null
+                && !string.IsNullOrWhiteSpace(draft.title)
+                && !string.IsNullOrWhiteSpace(draft.description);
         }
 
         private void DrawDesktopContent()
@@ -2126,11 +2564,28 @@ namespace MacacaGames.RuntimeBugReporter
         {
             yield break;
         }
+
+        private bool SaveActiveDraft()
+        {
+            return true;
+        }
+
+        private IEnumerator SendAllDrafts()
+        {
+            yield break;
+        }
 #else
         private void TryBeginSend()
         {
             if (isSending || (settings.enableRollingVideo && videoRecorder.IsFinalizing))
                 return;
+            if (!string.IsNullOrEmpty(activeDraftDirectory))
+            {
+                SaveActiveDraft();
+                statusIsError = false;
+                status = "Draft saved. Send it from Draft Inbox.";
+                return;
+            }
             if (string.IsNullOrWhiteSpace(title))
             {
                 validationMessage = "Add a short title so the team can scan this report.";
@@ -2211,27 +2666,128 @@ namespace MacacaGames.RuntimeBugReporter
                 validationMessage = "";
             }
         }
+
+        private bool SaveActiveDraft()
+        {
+            if (string.IsNullOrEmpty(activeDraftDirectory))
+                return true;
+
+            byte[] annotatedScreenshot = screenshotBytes;
+            if (screenshotAnnotator != null && screenshotAnnotator.HasAnnotations)
+            {
+                annotatedScreenshot = screenshotAnnotator.EncodePng();
+                screenshotBytes = annotatedScreenshot;
+            }
+
+            string error;
+            var saved = DraftReportArchive.TryUpdate(
+                activeDraftDirectory,
+                SafeCategories()[Mathf.Clamp(categoryIndex, 0, SafeCategories().Length - 1)],
+                title.Trim(),
+                description.Trim(),
+                reporter.Trim(),
+                includeScreenshotInReport,
+                includeVideoInReport,
+                annotatedScreenshot,
+                out error);
+            if (!saved)
+            {
+                Debug.LogError("[Macaca Beacon] Could not save draft edits: " + error);
+                statusIsError = true;
+                status = "Could not save draft: " + error;
+            }
+            return saved;
+        }
+
+        private IEnumerator SendAllDrafts()
+        {
+            if (isSending)
+                yield break;
+
+            isSending = true;
+            statusIsError = false;
+            status = "Sending drafts…";
+            var sent = 0;
+            var failed = 0;
+            var drafts = DraftReportArchive.LoadAll();
+            var incompleteCount = CountIncompleteDrafts(drafts);
+            if (drafts.Length == 0 || incompleteCount > 0)
+            {
+                isSending = false;
+                statusIsError = incompleteCount > 0;
+                status = incompleteCount > 0
+                    ? "Complete all drafts before sending."
+                    : "There are no drafts to send.";
+                yield break;
+            }
+
+            var transport = BugReporter.TransportOverride ?? new SlackBugReportTransport(settings.botToken, settings.channelId);
+            foreach (var draft in drafts)
+            {
+                string directory;
+                if (!DraftReportArchive.TryFindDirectory(draft.id, out directory))
+                {
+                    failed++;
+                    continue;
+                }
+                DraftReportManifest manifest;
+                BugReport report;
+                byte[] screenshot;
+                VideoCaptureResult video;
+                string loadError;
+                if (!DraftReportArchive.TryLoad(directory, out manifest, out report, out screenshot, out video, out loadError))
+                {
+                    DraftReportArchive.MarkFailed(directory, loadError);
+                    failed++;
+                    continue;
+                }
+
+                for (var index = report.Attachments.Count - 1; index >= 0; index--)
+                {
+                    var attachment = report.Attachments[index];
+                    var included = true;
+                    foreach (var descriptor in manifest.attachments ?? new DraftAttachmentManifest[0])
+                    {
+                        if (string.Equals(descriptor.fileName, attachment.FileName, StringComparison.Ordinal))
+                        {
+                            included = descriptor.included;
+                            break;
+                        }
+                    }
+                    if (!included)
+                        report.Attachments.RemoveAt(index);
+                }
+
+                var result = BugReportSendResult.Fail("The report transport ended without returning a result.");
+                yield return transport.Send(report, value => result = value);
+                if (result.Success)
+                {
+                    DraftReportArchive.Discard(directory);
+                    sent++;
+                }
+                else
+                {
+                    DraftReportArchive.MarkFailed(directory, result.Message);
+                    failed++;
+                }
+            }
+
+            isSending = false;
+            RefreshDrafts();
+            statusIsError = failed > 0;
+            status = "Sent " + sent + " draft(s).";
+            if (failed > 0)
+                status += " " + failed + " failed.";
+        }
 #endif
 
         private BugReport BuildReport()
         {
-            var report = new BugReport
-            {
-                Id = Guid.NewGuid().ToString("N").Substring(0, 10).ToUpperInvariant(),
-                CreatedUtc = DateTime.UtcNow,
-                Reporter = reporter.Trim(),
-                Category = SafeCategories()[Mathf.Clamp(categoryIndex, 0, SafeCategories().Length - 1)],
-                Title = title.Trim(),
-                Description = description.Trim()
-            };
-            report.Fields["Build"] = BuildVersionLabel();
-            report.Fields["Scene"] = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
-            report.Fields["UTC"] = report.CreatedUtc.ToString("O");
-            report.Fields["Device Model"] = SystemInfo.deviceModel;
-            report.Fields["CPU"] = SystemInfo.processorType + " (" + SystemInfo.processorCount + " cores)";
-            report.Fields["RAM"] = SystemInfo.systemMemorySize + " MB";
-            report.Fields["OS"] = SystemInfo.operatingSystem;
-            report.Fields["GPU"] = SystemInfo.graphicsDeviceName;
+            var report = CreateReport(
+                reporter.Trim(),
+                SafeCategories()[Mathf.Clamp(categoryIndex, 0, SafeCategories().Length - 1)],
+                title.Trim(),
+                description.Trim());
 
             if (ShouldAttachScreenshot(includeScreenshotInReport, screenshotBytes))
             {
@@ -2250,6 +2806,36 @@ namespace MacacaGames.RuntimeBugReporter
                 videoAttachment.DeleteSourceAfterStaging = true;
                 AddAttachmentIfAllowed(report, videoAttachment);
             }
+            return report;
+        }
+
+        private BugReport BuildIncidentSnapshot()
+        {
+            var categories = SafeCategories();
+            var category = categories[Mathf.Clamp(FindCategoryIndex("Other"), 0, categories.Length - 1)];
+            return CreateReport("", category, "", "");
+        }
+
+        private BugReport CreateReport(string reportReporter, string reportCategory, string reportTitle, string reportDescription)
+        {
+            var report = new BugReport
+            {
+                Id = Guid.NewGuid().ToString("N").Substring(0, 10).ToUpperInvariant(),
+                CreatedUtc = DateTime.UtcNow,
+                Reporter = reportReporter ?? "",
+                Category = reportCategory ?? "Other",
+                Title = reportTitle ?? "",
+                Description = reportDescription ?? ""
+            };
+            report.Fields["Build"] = BuildVersionLabel();
+            report.Fields["Scene"] = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+            report.Fields["UTC"] = report.CreatedUtc.ToString("O");
+            report.Fields["Device Model"] = SystemInfo.deviceModel;
+            report.Fields["CPU"] = SystemInfo.processorType + " (" + SystemInfo.processorCount + " cores)";
+            report.Fields["RAM"] = SystemInfo.systemMemorySize + " MB";
+            report.Fields["OS"] = SystemInfo.operatingSystem;
+            report.Fields["GPU"] = SystemInfo.graphicsDeviceName;
+
             if (settings.includeDiagnostics || settings.includeRecentLogs)
             {
                 var diagnostics = BuildDiagnostics();
@@ -2423,6 +3009,8 @@ namespace MacacaGames.RuntimeBugReporter
             var accent = MakeTexture(new Color(0.945f, 0.502f, 0.110f, 1f));
             var accentHover = MakeTexture(new Color(1f, 0.686f, 0.094f, 1f));
             var accentActive = MakeTexture(new Color(0.831f, 0.373f, 0.055f, 1f));
+            var completeCard = MakeTexture(new Color(0.902f, 0.965f, 0.941f, 1f));
+            var readyBadge = MakeTexture(new Color(0.09f, 0.48f, 0.50f, 1f));
 
             windowTexture = window;
             accentTexture = accent;
@@ -2469,6 +3057,12 @@ namespace MacacaGames.RuntimeBugReporter
                 margin = new RectOffset(0, 0, 0, 0)
             };
 
+            completeDraftCardStyle = new GUIStyle(cardStyle);
+            completeDraftCardStyle.normal.background = completeCard;
+            completeDraftCardStyle.hover.background = completeCard;
+            completeDraftCardStyle.active.background = completeCard;
+            completeDraftCardStyle.focused.background = completeCard;
+
             fieldStyle = new GUIStyle(GUI.skin.textField)
             {
                 fontSize = Mathf.RoundToInt(18 * scale),
@@ -2498,6 +3092,21 @@ namespace MacacaGames.RuntimeBugReporter
             SetStaticLabelColor(statusStyle, new Color(0.09f, 0.48f, 0.50f));
             validationStyle = new GUIStyle(hintStyle) { fontStyle = FontStyle.Bold };
             SetStaticLabelColor(validationStyle, new Color(0.70f, 0.23f, 0.20f));
+            readyBadgeStyle = new GUIStyle(hintStyle)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                fontStyle = FontStyle.Bold,
+                padding = new RectOffset(Mathf.RoundToInt(8 * scale), Mathf.RoundToInt(8 * scale), 0, 0),
+                margin = new RectOffset(4, 4, 0, 0)
+            };
+            readyBadgeStyle.normal.background = readyBadge;
+            readyBadgeStyle.hover.background = readyBadge;
+            readyBadgeStyle.active.background = readyBadge;
+            readyBadgeStyle.focused.background = readyBadge;
+            readyBadgeStyle.normal.textColor = Color.white;
+            readyBadgeStyle.hover.textColor = Color.white;
+            readyBadgeStyle.active.textColor = Color.white;
+            readyBadgeStyle.focused.textColor = Color.white;
             previewMessageStyle = new GUIStyle(hintStyle)
             {
                 alignment = TextAnchor.MiddleCenter,

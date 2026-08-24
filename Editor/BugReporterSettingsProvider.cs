@@ -17,7 +17,7 @@ namespace MacacaGames.RuntimeBugReporter.Editor
             {
                 label = "Macaca Beacon",
                 guiHandler = _ => DrawSettings(),
-                keywords = new[] { "bug", "report", "slack", "bot", "screenshot", "video", "F6" }
+                keywords = new[] { "bug", "report", "slack", "bot", "screenshot", "video", "F6", "F7", "F8", "draft" }
             };
         }
 
@@ -40,7 +40,7 @@ namespace MacacaGames.RuntimeBugReporter.Editor
 
             serializedSettings.Update();
             EditorGUILayout.Space(8);
-            EditorGUILayout.HelpBox("The configured shortcut and optional corner button open the IMGUI reporter at runtime. The Slack Bot sends the report and attachments into its thread.", MessageType.Info);
+            EditorGUILayout.HelpBox("Report Now opens the IMGUI reporter, Capture saves an incident to Draft Inbox, and Draft Inbox opens saved incidents. The Slack Bot sends reports and attachments into their threads.", MessageType.Info);
             EditorGUILayout.HelpBox("Do not ship a Slack bot token in an untrusted public client. Put secrets behind a rate-limited relay service.", MessageType.Warning);
             EditorGUILayout.Space(8);
 
@@ -49,11 +49,14 @@ namespace MacacaGames.RuntimeBugReporter.Editor
 #else
             Section("Activation");
             EditorGUILayout.PropertyField(Property("enableInBuild"));
-            EditorGUILayout.PropertyField(Property("shortcut"));
+            EditorGUILayout.PropertyField(Property("shortcut"), new GUIContent("Report Now Shortcut"));
+            EditorGUILayout.PropertyField(Property("captureShortcut"), new GUIContent("Capture Shortcut"));
+            EditorGUILayout.PropertyField(Property("draftInboxShortcut"), new GUIContent("Draft Inbox Shortcut"));
             EditorGUILayout.PropertyField(Property("allowEscapeToClose"));
 
             Section("Pause");
             EditorGUILayout.PropertyField(Property("pauseMode"));
+            EditorGUILayout.PropertyField(Property("pauseWhenOpeningDraftInbox"), new GUIContent("Pause When Opening Draft Inbox"));
 
             Section("Appearance");
             var fullscreen = Property("fullscreen");
@@ -108,6 +111,9 @@ namespace MacacaGames.RuntimeBugReporter.Editor
             Section("Local Fallback");
             EditorGUILayout.PropertyField(Property("saveFailedReportsLocally"));
             EditorGUILayout.PropertyField(Property("maximumRetainedLocalReports"));
+
+            Section("Draft Inbox");
+            EditorGUILayout.PropertyField(Property("maximumRetainedDrafts"));
 
             Section("Form");
             EditorGUILayout.PropertyField(Property("reportTitle"));

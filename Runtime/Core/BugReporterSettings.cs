@@ -39,8 +39,11 @@ namespace MacacaGames.RuntimeBugReporter
         // These properties are intentionally non-serialized shell values.
         public bool enableInBuild => false;
         public KeyCode shortcut => KeyCode.None;
+        public KeyCode captureShortcut => KeyCode.None;
+        public KeyCode draftInboxShortcut => KeyCode.None;
         public bool allowEscapeToClose => false;
         public BugReporterPauseMode pauseMode => BugReporterPauseMode.None;
+        public bool pauseWhenOpeningDraftInbox => false;
         public bool fullscreen => false;
         public float backdropOpacity => 0f;
         public float interfaceScale => 1f;
@@ -72,6 +75,7 @@ namespace MacacaGames.RuntimeBugReporter
         public int maximumAttachmentMegabytes => 1;
         public bool saveFailedReportsLocally => false;
         public int maximumRetainedLocalReports => 0;
+        public int maximumRetainedDrafts => 0;
         public string reportTitle => string.Empty;
         public string privacyNotice => string.Empty;
         public string[] categories => new[] { "Other" };
@@ -81,12 +85,19 @@ namespace MacacaGames.RuntimeBugReporter
         [FormerlySerializedAs("enableBugReporter")]
         [Tooltip("Enable Macaca Beacon in Player builds. Editor Play Mode remains enabled for testing.")]
         public bool enableInBuild = true;
+        [Tooltip("Report Now shortcut. Opens a new report and applies the configured Pause Mode.")]
         public KeyCode shortcut = KeyCode.F6;
+        [Tooltip("Capture shortcut. Saves the current incident to the draft inbox without opening the reporter or pausing gameplay.")]
+        public KeyCode captureShortcut = KeyCode.F7;
+        [Tooltip("Draft Inbox shortcut. Opens previously captured incidents for editing, deleting, and batch sending.")]
+        public KeyCode draftInboxShortcut = KeyCode.F8;
         public bool allowEscapeToClose = true;
 
         [Header("Pause")]
         [Tooltip("None keeps the current behavior. TimeScale sets Time.timeScale to 0 while the reporter is open. Custom requires an IBugReporterPauseHandler registered through BugReporter.SetPauseHandler.")]
         public BugReporterPauseMode pauseMode = BugReporterPauseMode.TimeScale;
+        [Tooltip("Pause gameplay while Draft Inbox and its draft editor are open. Uses the configured Pause Mode. Disabled keeps the current non-pausing behavior.")]
+        public bool pauseWhenOpeningDraftInbox = false;
 
         [Header("Appearance")]
         [Tooltip("Use the entire Game View for the report form. Disable this to use a centered desktop window.")]
@@ -149,9 +160,12 @@ namespace MacacaGames.RuntimeBugReporter
         public bool saveFailedReportsLocally = true;
         [Range(1, 100)] public int maximumRetainedLocalReports = 20;
 
+        [Header("Draft Inbox")]
+        [Range(1, 100)] public int maximumRetainedDrafts = 20;
+
         [Header("Form")]
         public string reportTitle = "MACACA BEACON";
-        public string privacyNotice = "This report sends your description, screenshot, recent logs, and device diagnostics to the development team for debugging only. A local copy is retained if upload fails.";
+        public string privacyNotice = "This report sends your description, screenshot, recent logs, and device diagnostics to the development team for debugging only. Captured drafts are retained locally during this game session until sent, deleted, or the game ends.";
         public string[] categories = { "Gameplay", "UI", "Visual", "Audio", "Performance", "Other" };
 #endif
 

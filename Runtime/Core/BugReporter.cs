@@ -35,11 +35,45 @@ namespace MacacaGames.RuntimeBugReporter
 
         public static void Open()
         {
+            ReportNow();
+        }
+
+        /// <summary>
+        /// Opens a new report for the current incident and applies the configured pause handler.
+        /// </summary>
+        public static void ReportNow()
+        {
 #if MACACA_BEACON_PRODUCTION || PRODUCTION
             return;
 #else
             if (EnsureController())
                 BugReporterController.Instance.RequestOpen();
+#endif
+        }
+
+        /// <summary>
+        /// Captures the current incident into the local draft inbox without opening the reporter or pausing gameplay.
+        /// </summary>
+        public static void CaptureToDraft()
+        {
+#if MACACA_BEACON_PRODUCTION || PRODUCTION
+            return;
+#else
+            if (EnsureController())
+                BugReporterController.Instance.RequestCaptureToDraft();
+#endif
+        }
+
+        /// <summary>
+        /// Opens the local draft inbox without applying the Report Now pause handler.
+        /// </summary>
+        public static void OpenDraftInbox()
+        {
+#if MACACA_BEACON_PRODUCTION || PRODUCTION
+            return;
+#else
+            if (EnsureController())
+                BugReporterController.Instance.RequestOpenDraftInbox();
 #endif
         }
 

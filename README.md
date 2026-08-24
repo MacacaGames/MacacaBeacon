@@ -4,7 +4,7 @@
 
 ![Macaca Beacon](Documentation~/Images/macaca-beacon-banner.png)
 
-遊戲內、可抽離為 UPM 的 Bug Report 工具。表單與影片預覽使用 **IMGUI**；桌面與手機皆可顯示安全區角落的低干擾入口，桌面另可用 F6、iOS／Android 可用三指長按手勢開啟。工具會收集截圖、最近 log、裝置／build／場景資訊，並送到 Slack。
+遊戲內、可抽離為 UPM 的 Bug Report 工具。表單與影片預覽使用 **IMGUI**；桌面與手機皆可顯示安全區角落的低干擾入口，桌面預設以 F6 立即回報、F7 擷取至草稿、F8 開啟 Draft Inbox，iOS／Android 仍可用三指長按手勢開啟立即回報。工具會收集截圖、最近 log、裝置／build／場景資訊，並送到 Slack。
 
 截圖預覽提供單層內建標注畫筆，圖片顯示後即可直接繪製，不需要進入另一個模式。工具列固定提供紅／黃／青三色、三種筆刷粗細、Undo、可復原的 Clear，以及重新截圖。完成的筆跡會合成進 Slack 與本地失敗備援所使用的 PNG。
 
@@ -14,7 +14,7 @@
 
 ## 專案內啟用
 
-這個 repository 已將套件放在 `Packages/com.macacagames.beacon`，Unity 會把它視為 embedded package。桌面進入 Play Mode 後直接按 **F6** 即可開啟；不需要在 Scene 放 prefab。勾選 `Show Entry Button` 後，桌面與手機都會顯示一個只佔自身矩形的小型 `!` 入口；iOS／Android 也可以用三指按住約 0.75 秒開啟。
+這個 repository 已將套件放在 `Packages/com.macacagames.beacon`，Unity 會把它視為 embedded package。桌面進入 Play Mode 後可按 **F6** 開啟立即回報、**F7** 記錄事件到草稿、**F8** 開啟 Draft Inbox；不需要在 Scene 放 prefab。勾選 `Show Entry Button` 後，桌面與手機都會顯示一個只佔自身矩形的小型 `!` 入口；iOS／Android 也可以用三指按住約 0.75 秒開啟立即回報。
 
 第一次設定請開啟：
 
@@ -22,7 +22,27 @@
 
 設定資產會建立於 `Assets/Resources/BugReporterSettings.asset`。
 
-`Enable In Build` 只控制 Player build 是否啟用 Beacon；Editor Play Mode 永遠可以使用目前設定進行開發與驗證。Player 關閉此選項後不會建立 runtime controller、收集 log 或 rolling video，F6、入口、手勢、`BugReporter.Open()` 與影片錄製 API 也不會啟動。若只想隱藏角落按鈕，關閉 `Show Entry Button` 即可；其他已啟用的入口仍可使用。
+`Enable In Build` 只控制 Player build 是否啟用 Beacon；Editor Play Mode 永遠可以使用目前設定進行開發與驗證。Player 關閉此選項後不會建立 runtime controller、收集 log 或 rolling video，F6、F7、F8、入口、手勢、`BugReporter.Open()` 與影片錄製 API 也不會啟動。若只想隱藏角落按鈕，關閉 `Show Entry Button` 即可；其他已啟用的入口仍可使用。
+
+## Collect Actions
+
+三個入口是獨立 action，不是互斥的即時／延遲模式：
+
+- `F6 / Report Now`：建立目前事件的回報，使用 `Pause Mode`，並開啟編輯器。
+- `F7 / Capture`：快照目前事件並保存到 Draft Inbox，不開啟完整 UI，也不暫停遊戲。
+- `F8 / Draft Inbox`：開啟之前擷取的事件，供編輯、刪除或集中批次送出；編輯畫面不直接送出。
+
+快捷鍵可在 `Tools > Macaca Beacon > Open Settings` 的 `Activation` 區段調整。API 對應如下：
+
+```csharp
+BugReporter.ReportNow();
+BugReporter.CaptureToDraft();
+BugReporter.OpenDraftInbox();
+```
+
+`BugReporter.Open()` 維持向後相容，等同於 `BugReporter.ReportNow()`。Draft Capture 會在事件發生時保存 scene、build、裝置資訊、recent logs、自訂資料、截圖與 rolling video；使用者之後可在 Draft Inbox 補上標題與描述。Draft 存在不會改變 F6 的行為，F6 永遠建立新的立即回報。
+
+草稿會保存於 `Application.persistentDataPath/MacacaBeacon/DraftReports`，只在目前遊戲 session 內保留，預設最多 20 份。成功送出、使用者刪除或遊戲結束時會移除；`Maximum Retained Drafts` 可調整 session 內的保留數量。Draft Inbox 只有在所有草稿都已填寫標題與描述後，才會啟用集中送出。
 
 ## Production 隔離
 
@@ -30,7 +50,7 @@
 
 `MACACA_BEACON_PRODUCTION` 或 `PRODUCTION`
 
-這會在編譯期將設定欄位替換為停用的 shell，並停用自動啟動、`BugReporter.Open()` 與影片錄製切換；不需要額外 CI 設定。未加入此 define 時，Editor 維持完整 Beacon 行為，Player 則依 `Enable In Build` 決定是否啟用。
+這會在編譯期將設定欄位替換為停用的 shell，並停用自動啟動、`BugReporter.Open()`、Draft actions 與影片錄製切換；不需要額外 CI 設定。未加入此 define 時，Editor 維持完整 Beacon 行為，Player 則依 `Enable In Build` 決定是否啟用。
 
 `Appearance` 預設使用全螢幕並將介面縮放設為 1.25，寬螢幕採左右雙欄，小尺寸 Game View 自動切換成可捲動單欄。關閉 `Fullscreen` 後會改用置中視窗，並可調整背景遮罩透明度與桌面視窗寬度比例。
 
@@ -57,7 +77,9 @@ Steam 專案可以在自己的 Steamworks 初始化完成後，以 `SteamUtils.I
 
 - `None`：維持 Beacon 原本行為，不主動暫停遊戲。
 - `TimeScale`：使用內建的 `TimeScaleBugReporterPauseHandler`，保存原本的 `Time.timeScale`，開啟回報時設為 `0`，關閉或送出成功後還原。
-- `Custom`：由宿主實作 `IBugReporterPauseHandler`，並在呼叫 `BugReporter.Open()` 前註冊。若未註冊，Beacon 不會開啟回報頁面。
+- `Custom`：由宿主實作 `IBugReporterPauseHandler`，並在呼叫 `BugReporter.ReportNow()` 前註冊。若未註冊，Beacon 不會開啟回報頁面。
+
+`Pause When Opening Draft Inbox` 預設關閉，維持開啟 Draft Inbox 不暫停遊戲的行為；開啟後，Draft Inbox 與其編輯頁會沿用上面的 `Pause Mode`，關閉後恢復遊戲狀態。
 
 ```csharp
 using MacacaGames.RuntimeBugReporter;
@@ -94,7 +116,7 @@ BugReporter.SetPauseHandler(new GamePauseHandler());
 ## 會送出的資料
 
 - 使用者輸入：分類、標題、描述、選填聯絡資訊
-- PNG 截圖（按 F6、角落入口或三指手勢後、面板出現前擷取）
+- PNG 截圖（按 F6 或 F7、角落入口或三指手勢後擷取）
 - 截圖上的選填畫筆標注
 - Product、version、build GUID、Unity、platform、OS、CPU、RAM、GPU、VRAM、resolution、scene
 - 有固定容量上限的 recent log ring buffer；Error／Exception 包含 stack trace
@@ -197,7 +219,7 @@ public sealed class GameBugContext : IBugReportDataProvider
 BugReporter.RegisterDataProvider(new GameBugContext());
 ```
 
-Editor Play Mode 可直接呼叫 `BugReporter.Open()`；Player 則需啟用 `Enable In Build`。也可用 `BugReporter.SetTransport(customTransport)` 注入任何 `IBugReportTransport`。
+Editor Play Mode 可直接呼叫 `BugReporter.ReportNow()`、`BugReporter.CaptureToDraft()` 或 `BugReporter.OpenDraftInbox()`；Player 則需啟用 `Enable In Build`。也可用 `BugReporter.SetTransport(customTransport)` 注入任何 `IBugReportTransport`。
 
 Rolling video 也提供 runtime API，可在遊戲內依效能或隱私需求切換；切換不會修改 Settings asset：
 
