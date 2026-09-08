@@ -120,6 +120,7 @@ BugReporter.SetPauseHandler(new GamePauseHandler());
 - 截圖上的選填畫筆標注
 - Product、version、build GUID、Unity、platform、OS、CPU、RAM、GPU、VRAM、resolution、scene
 - 有固定容量上限的 recent log ring buffer；Error／Exception 包含 stack trace
+- 同一份 `diagnostics-*.txt` 包含四個 Log 區段，使用同一時間點的快照：原本 Recent logs 保留全部類型最近 200 筆，另列一般 Log 最近 100 筆、Warning 最近 50 筆、Error／Exception／Assert 最近 50 筆。四個 buffer 獨立淘汰，重複訊息逐筆保留，錯誤分類包含 stack trace。`Maximum Normal Log Entries`、`Maximum Warning Log Entries`、`Maximum Error Log Entries` 設為 0 可停用對應區段，啟用但無紀錄時輸出 `No entries`。`Include Recent Logs` 控制全部 Log 輸出。草稿保存建立時的 diagnostics 快照，稍後送出時沿用保存的附件。
 - 不受 recent log 淘汰影響的錄影關鍵 timeline，包含 backend、fallback 錯誤、輸出尺寸、frame 數、時長與有效 FPS
 - 選填影片：macOS／Windows／Android／iOS 優先 H.264 MP4，預設 30 FPS、前 5 秒＋後 1 秒、無音訊
 

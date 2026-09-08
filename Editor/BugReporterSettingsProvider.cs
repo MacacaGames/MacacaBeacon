@@ -94,6 +94,9 @@ namespace MacacaGames.RuntimeBugReporter.Editor
             EditorGUILayout.PropertyField(Property("includeRecentLogs"));
             EditorGUILayout.PropertyField(Property("screenshotJpegQuality"));
             EditorGUILayout.PropertyField(Property("maximumLogEntries"));
+            EditorGUILayout.PropertyField(Property("maximumNormalLogEntries"));
+            EditorGUILayout.PropertyField(Property("maximumWarningLogEntries"));
+            EditorGUILayout.PropertyField(Property("maximumErrorLogEntries"));
 
             Section("Rolling Video");
             EditorGUILayout.PropertyField(Property("enableRollingVideo"));

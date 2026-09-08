@@ -62,6 +62,9 @@ namespace MacacaGames.RuntimeBugReporter
         public bool includeRecentLogs => false;
         public int screenshotJpegQuality => 85;
         public int maximumLogEntries => 0;
+        public int maximumNormalLogEntries => 0;
+        public int maximumWarningLogEntries => 0;
+        public int maximumErrorLogEntries => 0;
         public bool enableRollingVideo => false;
         public bool preferMp4 => false;
         public bool allowLegacyAviFallback => false;
@@ -137,6 +140,12 @@ namespace MacacaGames.RuntimeBugReporter
         public bool includeRecentLogs = true;
         [Range(20, 100)] public int screenshotJpegQuality = 85;
         [Min(20)] public int maximumLogEntries = 200;
+        [Tooltip("Additional Log entries retained independently in diagnostics. Zero disables this section.")]
+        [Min(0)] public int maximumNormalLogEntries = 100;
+        [Tooltip("Additional Warning entries retained independently in diagnostics. Zero disables this section.")]
+        [Min(0)] public int maximumWarningLogEntries = 50;
+        [Tooltip("Additional Error, Exception and Assert entries retained independently in diagnostics. Zero disables this section.")]
+        [Min(0)] public int maximumErrorLogEntries = 50;
 
         [Header("Rolling video (optional)")]
         [Tooltip("Continuously caches raw rolling frames. Windows/Proton uses a bounded preallocated native RAM ring; other generic fallbacks may use temporary disk files.")]

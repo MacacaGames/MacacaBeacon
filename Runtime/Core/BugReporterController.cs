@@ -165,7 +165,8 @@ namespace MacacaGames.RuntimeBugReporter
         internal void Initialize(BugReporterSettings value)
         {
             settings = value;
-            logs = new RecentLogCollector(settings.maximumLogEntries);
+            logs = new RecentLogCollector(settings.maximumLogEntries, settings.maximumNormalLogEntries,
+                settings.maximumWarningLogEntries, settings.maximumErrorLogEntries);
             videoRecorder = new RollingVideoRecorder(this, settings);
             videoRecorder.Start();
         }
@@ -2838,7 +2839,8 @@ namespace MacacaGames.RuntimeBugReporter
 
             if (settings.includeDiagnostics || settings.includeRecentLogs)
             {
-                var diagnostics = BuildDiagnostics();
+                var snapshot = settings.includeRecentLogs ? logs.CaptureSnapshot() : null;
+                var diagnostics = BuildDiagnostics(snapshot);
                 AddAttachmentIfAllowed(report, new BugReportAttachment("diagnostics-" + report.Id + ".txt", "text/plain", Encoding.UTF8.GetBytes(diagnostics), "Device diagnostics and recent logs"));
             }
             BugReporter.CollectCustomData(report);
@@ -2861,7 +2863,16 @@ namespace MacacaGames.RuntimeBugReporter
             }
         }
 
-        private string BuildDiagnostics()
+        private static void AppendLogSection(StringBuilder builder, string heading, string text)
+        {
+            if (text == null) return;
+            builder.AppendLine();
+            builder.AppendLine(heading);
+            builder.AppendLine("-----------");
+            builder.Append(text);
+        }
+
+        private string BuildDiagnostics(RecentLogCollector.Snapshot snapshot)
         {
             var builder = new StringBuilder();
             if (settings.includeDiagnostics)
@@ -2899,7 +2910,10 @@ namespace MacacaGames.RuntimeBugReporter
                 builder.AppendLine();
                 builder.AppendLine("Recent logs");
                 builder.AppendLine("-----------");
-                builder.Append(logs.BuildText());
+                builder.Append(snapshot.All);
+                AppendLogSection(builder, "Normal logs", snapshot.Normal);
+                AppendLogSection(builder, "Warning logs", snapshot.Warning);
+                AppendLogSection(builder, "Error logs (Error / Exception / Assert)", snapshot.Error);
             }
             return builder.ToString();
         }
