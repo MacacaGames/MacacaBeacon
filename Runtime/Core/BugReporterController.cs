@@ -18,7 +18,7 @@ namespace MacacaGames.RuntimeBugReporter
         PreviewUnavailable
     }
 
-    internal sealed class BugReporterController : MonoBehaviour
+    internal sealed partial class BugReporterController : MonoBehaviour
     {
         private static readonly string[] AnnotationColorLabels = { "RED", "YELLOW", "CYAN" };
         private static readonly string[] AnnotationSizeLabels = { "S", "M", "L" };
@@ -211,6 +211,7 @@ namespace MacacaGames.RuntimeBugReporter
                 ReturnToDraftInbox();
                 return;
             }
+            ResetMobileForm();
             IsOpen = false;
             SetInputBlocker(false);
             ResetVideoPreview();
@@ -264,6 +265,8 @@ namespace MacacaGames.RuntimeBugReporter
 
         private void OnDestroy()
         {
+            SyncMobileText();
+            mobileKeyboard.Dispose();
             if (Instance == this) Instance = null;
             if (!isQuitting && !string.IsNullOrEmpty(activeDraftDirectory))
                 SaveActiveDraft();
@@ -294,6 +297,7 @@ namespace MacacaGames.RuntimeBugReporter
 
         private void Update()
         {
+            if (IsOpen && MobileKeyboard.Supported) mobileKeyboard.Sample();
             if (IsOpen && !isSending && captureTabIndex == 1 && managedAviPreview != null)
             {
                 managedAviPreview.Update(Time.unscaledDeltaTime);
@@ -420,7 +424,8 @@ namespace MacacaGames.RuntimeBugReporter
             touchAnnotationFrame = -1;
             screenshotImageRectValid = false;
             SetInputBlocker(true);
-            pendingFocusControl = "BugReportTitle";
+            ResetMobileForm();
+            pendingFocusControl = MobileKeyboard.Supported ? null : MobileFormNavigation.Controls[0];
             status = !videoCaptureCompleted && videoCaptureRequested && settings.secondsAfter > 0
                 ? "Recording the seconds after the incident…"
                 : HasVideoCaptureFile(videoCapture)
@@ -638,9 +643,18 @@ namespace MacacaGames.RuntimeBugReporter
 
         private void DrawOpenReporter(Event current)
         {
-            if (settings.allowEscapeToClose && current.type == EventType.KeyDown && current.keyCode == KeyCode.Escape)
+            PrepareMobileForm(current);
+            if (current.type == EventType.KeyDown && current.keyCode == KeyCode.Escape
+                && (settings.allowEscapeToClose || (MobileKeyboard.Supported && (mobileKeyboardVisible || activeMobileField >= 0 || screenshotExpanded))))
             {
-                Close();
+                if (MobileKeyboard.Supported && Time.realtimeSinceStartup - mobileBackConsumedAt < 0.3f)
+                { /* The native keyboard already handled this Back press. */ }
+                else if (MobileKeyboard.Supported && (mobileKeyboardVisible || activeMobileField >= 0))
+                    DismissMobileKeyboard();
+                else if (MobileKeyboard.Supported && screenshotExpanded)
+                    pendingScreenshotExpansion = 0;
+                else
+                    Close();
                 current.Use();
                 return;
             }
@@ -699,6 +713,8 @@ namespace MacacaGames.RuntimeBugReporter
                 if (safeRight < Screen.width)
                     GUI.DrawTexture(new Rect(safeRight, safeTop, Screen.width - safeRight, windowRect.height), windowTexture);
             }
+            if (MobileKeyboard.Supported && mobileKeyboardVisible)
+                windowRect.height = Mathf.Max(1f, Mathf.Min(windowRect.yMax, mobileAvailableHeight) - windowRect.yMin);
             HandleScrollInput();
             GUI.color = Color.white;
             GUILayout.BeginArea(windowRect);
@@ -997,12 +1013,14 @@ namespace MacacaGames.RuntimeBugReporter
             GUI.DrawTexture(new Rect(0, 0, Mathf.Max(4f, 4f * styleScale), windowRect.height), accentTexture);
             GUI.color = Color.white;
             GUILayout.BeginVertical(GUILayout.ExpandHeight(true));
-            GUILayout.Space(18 * styleScale);
+            var compactHeader = MobileKeyboard.Supported && mobileKeyboardVisible;
+            GUILayout.Space((compactHeader ? 4f : 18f) * styleScale);
             GUILayout.BeginHorizontal();
             GUILayout.Space(28 * styleScale);
             GUILayout.BeginVertical();
             GUILayout.Label(isDraftInbox ? "DRAFT INBOX" : settings.reportTitle, titleStyle);
-            GUILayout.Label(isDraftInbox ? "Review captured incidents when it is safe to stop." : "Capture the moment. Signal the issue.", subtitleStyle);
+            if (!compactHeader)
+                GUILayout.Label(isDraftInbox ? "Review captured incidents when it is safe to stop." : "Capture the moment. Signal the issue.", subtitleStyle);
             GUILayout.EndVertical();
             GUILayout.FlexibleSpace();
             if (!IsMobileLayout())
@@ -1018,9 +1036,9 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.EndHorizontal();
             GUILayout.Space(18 * styleScale);
 
-            var contentTop = 94f * styleScale;
-            var footerHeight = 86f * styleScale;
-            var contentHeight = Mathf.Max(220f, windowRect.height - contentTop - footerHeight);
+            var contentTop = (compactHeader ? 56f : 94f) * styleScale;
+            var footerHeight = (compactHeader ? 56f : 86f) * styleScale;
+            var contentHeight = Mathf.Max(MobileKeyboard.Supported ? 1f : 220f, windowRect.height - contentTop - footerHeight);
             GUILayout.BeginArea(new Rect(0f, contentTop, windowRect.width, contentHeight));
             if (isDraftInbox)
             {
@@ -1035,7 +1053,9 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.EndArea();
 
             GUILayout.BeginArea(new Rect(0f, windowRect.height - footerHeight, windowRect.width, footerHeight));
-            if (isDraftInbox)
+            if (compactHeader && !isDraftInbox)
+                DrawMobileKeyboardToolbar();
+            else if (isDraftInbox)
                 DrawDraftInboxFooter();
             else if (!string.IsNullOrEmpty(activeDraftDirectory))
                 DrawDraftEditorFooter();
@@ -1263,6 +1283,7 @@ namespace MacacaGames.RuntimeBugReporter
                     screenshotAnnotator = new ScreenshotAnnotator(screenshotPreview);
             }
 
+            ResetMobileForm();
             activeDraftDirectory = directory;
             activeDraftManifest = manifest;
             isDraftInbox = false;
@@ -1275,16 +1296,18 @@ namespace MacacaGames.RuntimeBugReporter
             validationMessage = "";
             statusIsError = !string.IsNullOrEmpty(manifest.lastError);
             status = statusIsError ? "Previous send failed: " + manifest.lastError : "Draft loaded.";
-            pendingFocusControl = "BugReportTitle";
+            pendingFocusControl = MobileKeyboard.Supported ? null : MobileFormNavigation.Controls[0];
         }
 
         private bool ReturnToDraftInbox()
         {
+            SyncMobileText();
             if (!string.IsNullOrEmpty(activeDraftDirectory) && !SaveActiveDraft())
             {
                 statusIsError = true;
                 return false;
             }
+            ResetMobileForm();
             ResetVideoPreview();
             videoCapture = null;
             screenshotBytes = null;
@@ -1388,13 +1411,13 @@ namespace MacacaGames.RuntimeBugReporter
             // smaller window. Account for it before choosing two columns;
             // otherwise common 1366x768 displays get clipped scroll views.
             var scale = Mathf.Max(1f, styleScale);
-            return windowRect.width >= DesktopLayoutMinimumWidth * scale
+            return !MobileKeyboard.Supported && windowRect.width >= DesktopLayoutMinimumWidth * scale
                 && windowRect.height >= 720f * scale;
         }
 
         private bool IsMobileLayout()
         {
-            return windowRect.width <= MobileLayoutMaximumWidth;
+            return MobileKeyboard.Supported || windowRect.width <= MobileLayoutMaximumWidth;
         }
 
         private float GetUiScale()
@@ -1638,7 +1661,14 @@ namespace MacacaGames.RuntimeBugReporter
             DrawForm(true);
             GUILayout.Space(12 * styleScale);
             GUILayout.Label(settings.privacyNotice, hintStyle);
+            if (MobileKeyboard.Supported && mobileKeyboardVisible)
+                GUILayout.Space(96f * styleScale);
             GUILayout.EndScrollView();
+            if (Event.current.type == EventType.Repaint && MobileKeyboard.Supported)
+            {
+                mobileFormViewport = ToScreenRect(GUILayoutUtility.GetLastRect());
+                RevealMobileField();
+            }
             GUILayout.EndVertical();
             GUILayout.Space(28 * styleScale);
             GUILayout.EndHorizontal();
@@ -1671,6 +1701,13 @@ namespace MacacaGames.RuntimeBugReporter
 
         private void DrawScreenshotPanel(float previewWidth, float fallbackHeight)
         {
+            if (MobileKeyboard.Supported && !screenshotExpanded)
+            {
+                DrawScreenshotThumbnail(previewWidth);
+                return;
+            }
+            if (MobileKeyboard.Supported && SoftwareCursorButton("收合", buttonStyle, GUILayout.Height(44f * styleScale)))
+                pendingScreenshotExpansion = 0;
             GUILayout.BeginHorizontal();
             DrawLabel("SCREENSHOT");
             GUILayout.FlexibleSpace();
@@ -2519,24 +2556,27 @@ namespace MacacaGames.RuntimeBugReporter
             GUILayout.Space(14 * styleScale);
 
             DrawLabel("TITLE  *");
-            RestoreSoftwareCursorTextFocus("BugReportTitle");
-            GUI.SetNextControlName("BugReportTitle");
+            RestoreSoftwareCursorTextFocus(MobileFormNavigation.Controls[0]);
+            GUI.SetNextControlName(MobileFormNavigation.Controls[0]);
             title = GUILayout.TextField(title, 120, fieldStyle, GUILayout.Height(48 * styleScale));
-            FocusSoftwareCursorControl("BugReportTitle", GUILayoutUtility.GetLastRect());
+            FocusSoftwareCursorControl(MobileFormNavigation.Controls[0], GUILayoutUtility.GetLastRect());
+            TrackMobileField(0, GUILayoutUtility.GetLastRect());
             GUILayout.Space(12 * styleScale);
 
             DrawLabel("WHAT HAPPENED?  *");
-            RestoreSoftwareCursorTextFocus("BugReportDescription");
-            GUI.SetNextControlName("BugReportDescription");
+            RestoreSoftwareCursorTextFocus(MobileFormNavigation.Controls[1]);
+            GUI.SetNextControlName(MobileFormNavigation.Controls[1]);
             description = GUILayout.TextArea(description, 2000, areaStyle, GUILayout.MinHeight((compact ? 116 : 150) * styleScale));
-            FocusSoftwareCursorControl("BugReportDescription", GUILayoutUtility.GetLastRect());
+            FocusSoftwareCursorControl(MobileFormNavigation.Controls[1], GUILayoutUtility.GetLastRect());
+            TrackMobileField(1, GUILayoutUtility.GetLastRect());
             GUILayout.Space(12 * styleScale);
 
             DrawLabel("REPORTER / CONTACT  (OPTIONAL)");
-            RestoreSoftwareCursorTextFocus("BugReportReporter");
-            GUI.SetNextControlName("BugReportReporter");
+            RestoreSoftwareCursorTextFocus(MobileFormNavigation.Controls[2]);
+            GUI.SetNextControlName(MobileFormNavigation.Controls[2]);
             reporter = GUILayout.TextField(reporter, 120, fieldStyle, GUILayout.Height(48 * styleScale));
-            FocusSoftwareCursorControl("BugReportReporter", GUILayoutUtility.GetLastRect());
+            FocusSoftwareCursorControl(MobileFormNavigation.Controls[2], GUILayoutUtility.GetLastRect());
+            TrackMobileField(2, GUILayoutUtility.GetLastRect());
 
             if (!string.IsNullOrEmpty(validationMessage))
             {
@@ -2590,13 +2630,13 @@ namespace MacacaGames.RuntimeBugReporter
             if (string.IsNullOrWhiteSpace(title))
             {
                 validationMessage = "Add a short title so the team can scan this report.";
-                pendingFocusControl = "BugReportTitle";
+                pendingFocusControl = MobileFormNavigation.Controls[0];
                 return;
             }
             if (string.IsNullOrWhiteSpace(description))
             {
                 validationMessage = "Describe what happened and what you expected instead.";
-                pendingFocusControl = "BugReportDescription";
+                pendingFocusControl = MobileFormNavigation.Controls[1];
                 return;
             }
             validationMessage = "";
