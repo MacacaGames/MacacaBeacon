@@ -1,5 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -34,13 +36,14 @@ namespace MacacaGames.RuntimeBugReporter
             }
         }
 
-        public static long CreateSession(string outputPath, int width, int height, int fps, int bitrateKbps)
+        public static long CreateSession(int width, int height, int fps, int bitrateKbps, int secondsBefore, int maximumCacheMegabytes)
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
             if (!IsAvailable)
                 return 0;
             using (var bridge = new AndroidJavaClass("com.macacagames.beacon.MacacaBeaconVideo"))
-                return bridge.CallStatic<long>("createSurfaceSession", outputPath, width, height, fps, Math.Max(128, bitrateKbps) * 1000);
+                return bridge.CallStatic<long>("createSurfaceSession", width, height, fps, Math.Max(128, bitrateKbps) * 1000,
+                    (double)Math.Max(0, secondsBefore), Math.Max(1L, maximumCacheMegabytes) * 1024L * 1024L);
 #else
             return 0;
 #endif
@@ -65,15 +68,51 @@ namespace MacacaGames.RuntimeBugReporter
 #endif
         }
 
-        public static bool FinishSession(long session)
+        public static bool BeginClip(long session, string path, double startSeconds, double endSeconds)
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
-            if (session == 0)
-                return false;
             using (var bridge = new AndroidJavaClass("com.macacagames.beacon.MacacaBeaconVideo"))
-                return bridge.CallStatic<int>("finishSurfaceSession", session) != 0;
+                return bridge.CallStatic<int>("beginSurfaceClip", session, path, startSeconds, endSeconds) != 0;
 #else
             return false;
+#endif
+        }
+
+        public static int ClipState(long session)
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            using (var bridge = new AndroidJavaClass("com.macacagames.beacon.MacacaBeaconVideo"))
+                return bridge.CallStatic<int>("surfaceClipState", session);
+#else
+            return -1;
+#endif
+        }
+
+        public static double[] ClipInfo(long session)
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            using (var bridge = new AndroidJavaClass("com.macacagames.beacon.MacacaBeaconVideo"))
+                return bridge.CallStatic<double[]>("surfaceClipInfo", session);
+#else
+            return Array.Empty<double>();
+#endif
+        }
+
+        public static void ReleaseClip(long session, bool cancel)
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            using (var bridge = new AndroidJavaClass("com.macacagames.beacon.MacacaBeaconVideo"))
+                bridge.CallStatic("releaseSurfaceClip", session, cancel);
+#endif
+        }
+
+        public static string LastCreateError()
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            using (var bridge = new AndroidJavaClass("com.macacagames.beacon.MacacaBeaconVideo"))
+                return bridge.CallStatic<string>("lastCreateError");
+#else
+            return null;
 #endif
         }
 
@@ -87,13 +126,32 @@ namespace MacacaGames.RuntimeBugReporter
 #endif
         }
 
-        public static void DestroySession(long session)
+        public static void DestroySession(long session, Action completed)
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
-            if (session == 0)
-                return;
-            using (var bridge = new AndroidJavaClass("com.macacagames.beacon.MacacaBeaconVideo"))
-                bridge.CallStatic("destroySurfaceSession", session);
+            var context = SynchronizationContext.Current;
+            Task.Run(() =>
+            {
+                AndroidJNI.AttachCurrentThread();
+                try
+                {
+                    using (var bridge = new AndroidJavaClass("com.macacagames.beacon.MacacaBeaconVideo"))
+                        bridge.CallStatic("destroySurfaceSession", session);
+                    // RenderTextures are Unity objects. Release them on the
+                    // captured main thread only after native submissions finish.
+                    context.Post(_ => completed?.Invoke(), null);
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogWarning("[Macaca Beacon] Android asynchronous cleanup failed: " + exception.Message);
+                }
+                finally
+                {
+                    AndroidJNI.DetachCurrentThread();
+                }
+            });
+#else
+            completed?.Invoke();
 #endif
         }
 

@@ -54,7 +54,7 @@ namespace MacacaGames.RuntimeBugReporter
         private bool backendEnvironmentLogged;
         private VideoCaptureResult lastDiagnosticCapture;
         private readonly MacOsGpuRollingVideoRecorder gpuRecorder;
-        private readonly AndroidGpuRollingVideoRecorder androidGpuRecorder;
+        private AndroidGpuRollingVideoRecorder androidGpuRecorder;
         private WindowsGpuRollingVideoRecorder windowsGpuRecorder;
 
         public bool IsFinalizing => gpuRecorder != null ? gpuRecorder.IsFinalizing : androidGpuRecorder != null ? androidGpuRecorder.IsFinalizing : windowsGpuRecorder != null ? windowsGpuRecorder.IsFinalizing : isFinalizing;
@@ -88,7 +88,7 @@ namespace MacacaGames.RuntimeBugReporter
 #endif
 #if UNITY_ANDROID && !UNITY_EDITOR
             if (EnableExperimentalAndroidGpuPath && AndroidGpuVideoBridge.IsAvailable)
-                androidGpuRecorder = new AndroidGpuRollingVideoRecorder(host, settings);
+                androidGpuRecorder = new AndroidGpuRollingVideoRecorder(host, settings, RecoverFromAndroidGpuFailure);
 #endif
 #if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
             if (EnableExperimentalWindowsGpuPath &&
@@ -266,6 +266,15 @@ namespace MacacaGames.RuntimeBugReporter
 #endif
             captureStartedTime = Time.realtimeSinceStartupAsDouble;
             captureCoroutine = host.StartCoroutine(CaptureLoop());
+        }
+
+        private void RecoverFromAndroidGpuFailure(string error)
+        {
+            androidGpuRecorder = null;
+            RecordDiagnostic("Android GPU video failed on " + SystemInfo.graphicsDeviceType + ": " + error +
+                             " Switching to generic MP4/AVI capture with fresh history.", LogType.Warning);
+            if (requestedEnabled)
+                StartGenericCapture();
         }
 
         private void RecoverFromWindowsGpuFailure(string error, Action<VideoCaptureResult> pendingIncident)

@@ -194,7 +194,13 @@ Windows native source 位於 `Native~/Windows`。在裝有 Visual Studio 2022「
 
 iOS 使用 `Runtime/Plugins/iOS/MacacaBeaconVideo.mm`，由 Unity 產生 Xcode project 時直接編入，透過 `DllImport("__Internal")` 呼叫 Metal render-event bridge 與 AVAssetWriter。GPU 路徑直接把 Unity Metal texture blit 到 IOSurface-backed CVPixelBuffer，並使用 iOS 硬體 H.264 路徑；PluginImporter 會加入 AVFoundation、CoreGraphics、CoreMedia、CoreVideo、ImageIO、Metal 與 VideoToolbox。不需要在 Scene 放置額外元件。
 
-Android 使用 `Runtime/Plugins/Android/MacacaBeaconVideo.java`，透過 Android 內建的 `MediaCodec` 與 `MediaMuxer` 將 RGBA frame 轉換為 encoder 支援的 YUV420 並編碼為 H.264 MP4；不需要額外安裝 ffmpeg 或加入錄影權限。
+Android GPU 路徑透過 `MediaCodec` 的 input Surface 持續編碼 H.264，Java 端僅保留最近的壓縮影格，不會從遊戲啟動起持續寫入整場 MP4。回報觸發時固定事件時間，保護 `Seconds Before` 的歷史並收集 `Seconds After`，再由背景工作以 `MediaMuxer` 封裝獨立 MP4；封裝不會停止編碼器，因此連續回報仍保有前段歷史。輸出從目標起點之前最近的關鍵影格開始，通常可能多留約一秒，實際以裝置產生的關鍵影格為準；低 FPS 仍保留真實時間間隔。輸出尺寸使用編碼器的實際對齊尺寸。
+
+壓縮歷史與匯出工作持有的影格共用 `Maximum Video Cache Megabytes` 上限。容量不足以保留完整事件、初始化／編碼失敗，或事件結束後 10 秒仍無法完成時，本次回報可不附影片繼續，後續切換通用錄影並重新累積歷史；原因會列入 diagnostics。停用或離開會取消工作並清理未完成檔案。`Maximum Attachment Megabytes` 仍限制最終附件大小。
+
+Android 通用相容路徑仍使用 `Runtime/Plugins/Android/MacacaBeaconVideo.java`，將 RGBA frame 轉換為 encoder 支援的 YUV420 並編碼為 H.264 MP4。兩條路徑都不需要額外安裝 ffmpeg 或加入錄影權限。
+
+壓縮快取的主機端回歸測試可執行 `bash Tests~/Android/run-tests.sh`；需要 Java JDK，可使用 Unity Android 模組附帶的 OpenJDK，或以 `BEACON_JAVA_BIN` 指定其 `bin` 目錄。裝置上的編碼、MP4 播放與 Vulkan／OpenGLES3 行為仍須實機驗證。
 
 其他平台可以實作 `IVideoEncoderBackend`，並在遊戲初始化時呼叫 `BugReporter.SetVideoEncoder(backend)`。Backend 會收到含 frame format、尺寸、temporary data path 與 realtime timestamp 的唯讀 frame list，並可用 `ReadData()` 逐張載入，避免一次載入整段影片；成功後套件會自動接手本地 staging、Slack 上傳與清理。
 

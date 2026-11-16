@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fixed Android GPU incident capture recording the entire session: retain bounded H.264 history, select a preceding keyframe around `Seconds Before`, collect `Seconds After`, and export MP4 asynchronously without restarting the encoder.
+- Count shared export pins against the compressed cache budget, preserve real timestamps and encoded dimensions, reject overlapping incidents, and complete failed/cancelled reports without hanging Send. GPU failure or a ten-second export deadline switches subsequent capture to the generic recorder.
+- Added Android-independent compressed history tests and Unity regression coverage for duplicate requests, cancellation and missing-frame deadlines. Android device playback and graphics-backend verification remain required.
+
 - Added configurable gameplay pause modes: None, TimeScale (default, implemented by `TimeScaleBugReporterPauseHandler`), and Custom via `IBugReporterPauseHandler`.
 - Added independent Collect Actions: F6 Report Now, F7 Capture to Draft, and F8 Draft Inbox, with session-local editable incident drafts and batch sending.
 - Kept draft editing as save/back only, centralized batch sending in Draft Inbox, blocked sending until every draft has a title and description, and cleared all drafts when the game ends.

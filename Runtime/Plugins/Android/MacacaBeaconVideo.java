@@ -10,6 +10,7 @@ import android.media.MediaCodecList;
 import android.media.MediaFormat;
 import android.media.MediaMuxer;
 import android.os.Build;
+import android.os.Bundle;
 import android.view.Surface;
 import android.util.Log;
 
@@ -107,17 +108,20 @@ public final class MacacaBeaconVideo {
         if (session != null) session.close();
     }
 
-    public static synchronized long createSurfaceSession(String path, int width, int height, int fps, int bitrate) {
+    public static synchronized long createSurfaceSession(int width, int height, int fps, int bitrate,
+            double secondsBefore, long maximumBytes) {
+        SurfaceSession session = null;
+        long id = nextSurfaceId++;
         try {
-            SurfaceSession session = new SurfaceSession(path, width, height, fps, bitrate);
-            long id = nextSurfaceId++;
-            if (!nativeVideoLoaded || nativeRegisterSurface(id, session.inputSurface) == 0) {
-                session.close();
+            session = new SurfaceSession(width, height, fps, bitrate, secondsBefore, maximumBytes);
+            if (!nativeVideoLoaded || nativeRegisterSurface(id, session.inputSurface) == 0)
                 throw new IOException("Android GPU video plugin could not register the MediaCodec input Surface.");
-            }
             surfaceSessions.put(id, session);
+            session.start();
             return id;
         } catch (Exception exception) {
+            surfaceSessions.remove(id);
+            if (session != null) session.closeAsync(id);
             lastCreateFailure = exception.getClass().getSimpleName() + ": " + exception.getMessage();
             Log.e("MacacaBeacon", "Could not create Android Surface H.264 encoder", exception);
             return 0;
@@ -129,25 +133,38 @@ public final class MacacaBeaconVideo {
         return session == null ? null : session.inputSurface;
     }
 
-    public static synchronized int finishSurfaceSession(long id) {
+    public static synchronized int beginSurfaceClip(long id, String path, double startSeconds, double endSeconds) {
         SurfaceSession session = surfaceSessions.get(id);
-        if (nativeVideoLoaded) {
-            try { nativeWaitForIdle(id); } catch (Throwable ignored) { }
-        }
-        return session == null ? 0 : session.finish();
+        return session == null ? 0 : session.beginClip(path, startSeconds, endSeconds);
+    }
+
+    // 0: collecting, 1: muxing, 2: success, -1: failed/cancelled.
+    public static synchronized int surfaceClipState(long id) {
+        SurfaceSession session = surfaceSessions.get(id);
+        return session == null ? -1 : session.clipState();
+    }
+
+    public static synchronized double[] surfaceClipInfo(long id) {
+        SurfaceSession session = surfaceSessions.get(id);
+        return session == null ? new double[0] : session.clipInfo();
     }
 
     public static synchronized String surfaceSessionError(long id) {
         SurfaceSession session = surfaceSessions.get(id);
-        return session == null ? "Android Surface encoder session was not found." : session.error;
+        return session == null ? "Android Surface encoder session was not found." : session.lastError();
     }
 
-    public static synchronized void destroySurfaceSession(long id) {
-        SurfaceSession session = surfaceSessions.remove(id);
-        if (nativeVideoLoaded) {
-            try { nativeUnregisterSurface(id); } catch (Throwable ignored) { }
-        }
-        if (session != null) session.close();
+    public static synchronized void releaseSurfaceClip(long id, boolean cancel) {
+        SurfaceSession session = surfaceSessions.get(id);
+        if (session != null) session.releaseClip(cancel);
+    }
+
+    // Invoked on an attached C# worker. Do not hold the global bridge lock
+    // while waiting for render events or releasing the codec.
+    public static void destroySurfaceSession(long id) {
+        SurfaceSession session;
+        synchronized (MacacaBeaconVideo.class) { session = surfaceSessions.remove(id); }
+        if (session != null) session.close(id);
     }
 
     public static synchronized long beginEncodeRawFiles(
@@ -285,111 +302,244 @@ public final class MacacaBeaconVideo {
     }
 
     private static final class SurfaceSession implements Runnable {
-        private final MediaCodec codec;
-        private final MediaMuxer muxer;
+        private MediaCodec codec;
+        private Surface inputSurface;
         private final MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
-        private final Surface inputSurface;
-        private final int width;
-        private final int height;
+        private final BeaconEncodedVideoBuffer history;
         private final int fps;
-        private int track = -1;
-        private boolean muxerStarted;
-        private volatile boolean finished;
+        private final int encodedWidth;
+        private final int encodedHeight;
+        private volatile boolean stopping;
+        private volatile boolean closing;
         private volatile String error;
-        private int encodedSampleCount;
-        private long lastPresentationTimeUs = -1L;
+        private MediaFormat outputFormat;
         private Thread drainThread;
+        private ClipJob clip;
+        private long lastKeyUs = -1;
+        private long lastSyncRequestUs = -1;
 
-        SurfaceSession(String path, int requestedWidth, int requestedHeight, int requestedFps, int bitrate) throws Exception {
-            width = align16(Math.max(2, requestedWidth));
-            height = align16(Math.max(2, requestedHeight));
+        SurfaceSession(int requestedWidth, int requestedHeight, int requestedFps, int bitrate,
+                double secondsBefore, long maximumBytes) throws Exception {
+            int width = align16(Math.max(2, requestedWidth));
+            int height = align16(Math.max(2, requestedHeight));
+            encodedWidth = width;
+            encodedHeight = height;
             fps = Math.max(1, requestedFps);
+            history = new BeaconEncodedVideoBuffer((long)(Math.max(0, secondsBefore) * 1000000d), maximumBytes);
             MediaCodecInfo codecInfo = findSurfaceCodec();
             if (codecInfo == null) throw new IOException("No Android H.264 surface encoder is available.");
+            try {
+                MediaFormat format = MediaFormat.createVideoFormat("video/avc", width, height);
+                format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
+                format.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
+                format.setInteger(MediaFormat.KEY_BIT_RATE, Math.max(128000, bitrate));
+                format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
+                // Baseline has no B frames, so decode order and presentation order agree.
+                format.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline);
+                codec = MediaCodec.createByCodecName(codecInfo.getName());
+                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+                inputSurface = codec.createInputSurface();
+                codec.start();
+            } catch (Exception exception) {
+                if (inputSurface != null) inputSurface.release();
+                if (codec != null) codec.release();
+                throw exception;
+            }
+            Log.i("MacacaBeacon", "Android rolling Surface encoder " + codecInfo.getName()
+                    + " size=" + width + "x" + height + " cacheLimit=" + maximumBytes);
+        }
 
-            MediaFormat format = MediaFormat.createVideoFormat("video/avc", width, height);
-            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
-            format.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
-            format.setInteger(MediaFormat.KEY_BIT_RATE, Math.max(128000, bitrate));
-            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
-            codec = MediaCodec.createByCodecName(codecInfo.getName());
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-            inputSurface = codec.createInputSurface();
-            codec.start();
-            muxer = new MediaMuxer(path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
-            error = null;
+        void start() {
             drainThread = new Thread(this, "MacacaBeaconSurfaceDrain");
             drainThread.setPriority(Thread.NORM_PRIORITY - 1);
             drainThread.start();
-            Log.i("MacacaBeacon", "Using Android Surface H.264 encoder " + codecInfo.getName() + " size=" + width + "x" + height);
         }
 
         @Override public void run() {
-            try {
-                while (!finished) drain(false);
-                drain(true);
-            } catch (Throwable throwable) {
-                error = throwable.getClass().getSimpleName() + ": " + throwable.getMessage();
-                Log.e("MacacaBeacon", "Android Surface drain failed", throwable);
+            while (!stopping) {
+                try {
+                    drain();
+                    if (!closing && error == null) prepareClip();
+                } catch (Throwable throwable) {
+                    if (error == null) {
+                        error = throwable.getClass().getSimpleName() + ": " + throwable.getMessage();
+                        Log.e("MacacaBeacon", "Android Surface drain failed", throwable);
+                    }
+                    // A failed history/export must still drain codec output:
+                    // queued GPU swaps can otherwise block forever on backpressure.
+                    try { Thread.sleep(10); } catch (InterruptedException ignored) { }
+                }
             }
         }
 
-        int finish() {
-            if (finished) return error == null ? 1 : 0;
+        synchronized int beginClip(String path, double startSeconds, double endSeconds) {
+            if (closing || stopping || error != null || clip != null) return 0;
             try {
-                codec.signalEndOfInputStream();
-                finished = true;
-                if (drainThread != null) drainThread.join(5000);
-                if (error == null && muxerStarted) {
-                    muxer.stop();
-                    muxerStarted = false;
-                }
-                if (error == null && encodedSampleCount == 0)
-                    error = "Android Surface encoder produced no video samples.";
-                return error == null ? 1 : 0;
+                clip = new ClipJob(path, history.begin((long)(startSeconds * 1000000d),
+                        (long)(endSeconds * 1000000d)));
+                return 1;
             } catch (Exception exception) {
-                error = exception.getMessage() == null ? "Android Surface finalization failed." : exception.getMessage();
+                error = exception.getMessage();
                 return 0;
             }
         }
 
-        private void drain(boolean endOfStream) {
-            int idleCount = 0;
-            while (idleCount < (endOfStream ? 100 : 2)) {
-                int result = codec.dequeueOutputBuffer(bufferInfo, 10000);
-                if (result == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                    idleCount++;
-                } else if (result == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    if (muxerStarted) throw new IllegalStateException("Android Surface encoder changed output format twice.");
-                    track = muxer.addTrack(codec.getOutputFormat());
-                    muxer.start();
-                    muxerStarted = true;
-                } else if (result >= 0) {
+        synchronized int clipState() {
+            if (error != null || clip == null || clip.cancelled) return -1;
+            return clip.done ? (clip.error == null ? 2 : -1) : clip.started ? 1 : 0;
+        }
+
+        synchronized double[] clipInfo() {
+            if (clip == null || !clip.done || clip.error != null) return new double[0];
+            return new double[] { clip.startUs / 1000000d, clip.endUs / 1000000d,
+                    clip.sampleCount, history.retainedBytes(), encodedWidth, encodedHeight };
+        }
+
+        synchronized String lastError() {
+            return error != null ? error : clip == null ? "" : clip.error;
+        }
+
+        synchronized void releaseClip(boolean cancel) {
+            if (clip == null) return;
+            if (cancel) clip.cancelled = true;
+            if (!clip.started) {
+                history.release(clip.range);
+                new File(clip.path).delete();
+            }
+            if (clip.done && cancel) new File(clip.path).delete();
+            // An in-flight exporter owns its pins until its finally block.
+            // Keep it registered until it exits; a new incident must not overlap.
+            if (!clip.started || clip.done) clip = null;
+        }
+
+        private synchronized void prepareClip() {
+            if (clip == null || clip.started || clip.done || clip.cancelled || outputFormat == null) return;
+            try {
+                if (!history.snapshot(clip.range)) return;
+                clip.startUs = clip.range.startUs;
+                long lastUs = clip.range.samples.get(clip.range.samples.size() - 1).timeUs;
+                clip.endUs = Math.max(clip.range.endUs,
+                        lastUs + (lastUs >= clip.range.endUs ? Math.max(1L, 1000000L / fps) : 1L));
+                clip.sampleCount = clip.range.samples.size();
+                clip.started = true;
+                clip.format = outputFormat;
+                Thread worker = new Thread(clip, "MacacaBeaconClipMux");
+                worker.setPriority(Thread.NORM_PRIORITY - 1);
+                worker.start();
+            } catch (Exception exception) {
+                clip.error = exception.getMessage();
+                history.release(clip.range);
+                clip.done = true;
+            }
+        }
+
+        private void drain() {
+            int result = codec.dequeueOutputBuffer(bufferInfo, 10000);
+            if (result == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                synchronized (this) {
+                    if (outputFormat != null) throw new IllegalStateException("Surface encoder changed output format mid-session.");
+                    outputFormat = codec.getOutputFormat();
+                }
+            } else if (result >= 0) {
+                try {
                     ByteBuffer output = codec.getOutputBuffer(result);
-                    if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 && bufferInfo.size > 0 && muxerStarted && output != null) {
-                        long minimumStepUs = Math.max(1L, 1000000L / Math.max(1, fps));
-                        if (bufferInfo.presentationTimeUs <= lastPresentationTimeUs)
-                            bufferInfo.presentationTimeUs = lastPresentationTimeUs + minimumStepUs;
-                        lastPresentationTimeUs = bufferInfo.presentationTimeUs;
+                    if (!closing && error == null && (bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
+                            && bufferInfo.size > 0 && output != null) {
+                        history.checkCapacity(bufferInfo.size, bufferInfo.presentationTimeUs);
+                        byte[] bytes = new byte[bufferInfo.size];
                         output.position(bufferInfo.offset);
                         output.limit(bufferInfo.offset + bufferInfo.size);
-                        muxer.writeSampleData(track, output, bufferInfo);
-                        encodedSampleCount++;
+                        output.get(bytes);
+                        history.append(bytes, bufferInfo.presentationTimeUs, bufferInfo.flags);
+                        if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) lastKeyUs = bufferInfo.presentationTimeUs;
+                        if (bufferInfo.presentationTimeUs - lastKeyUs > 1500000L
+                                && bufferInfo.presentationTimeUs - lastSyncRequestUs > 1000000L) {
+                            Bundle parameters = new Bundle();
+                            parameters.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
+                            codec.setParameters(parameters);
+                            lastSyncRequestUs = bufferInfo.presentationTimeUs;
+                        }
                     }
-                    boolean eos = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
+                } finally {
                     codec.releaseOutputBuffer(result, false);
-                    if (eos) break;
                 }
             }
         }
 
-        void close() {
-            try { if (!finished) finish(); } catch (Exception ignored) { }
-            try { inputSurface.release(); } catch (Exception ignored) { }
-            try { if (muxerStarted) muxer.stop(); } catch (Exception ignored) { }
-            try { muxer.release(); } catch (Exception ignored) { }
-            try { codec.stop(); } catch (Exception ignored) { }
-            try { codec.release(); } catch (Exception ignored) { }
+        void closeAsync(final long id) {
+            new Thread(() -> close(id), "MacacaBeaconSurfaceCleanup").start();
+        }
+
+        void close(long id) {
+            closing = true;
+            releaseClip(true);
+            try {
+                // Caller is a worker: Unity must remain free to finish queued
+                // submissions, and their source textures stay alive until return.
+                if (nativeVideoLoaded) nativeWaitForIdle(id);
+                if (nativeVideoLoaded) nativeUnregisterSurface(id);
+                stopping = true;
+                if (drainThread != null) drainThread.join();
+                codec.stop();
+            } catch (Throwable throwable) {
+                Log.w("MacacaBeacon", "Surface encoder cleanup failed", throwable);
+            } finally {
+                stopping = true;
+                try { codec.release(); } catch (Exception ignored) { }
+                try { inputSurface.release(); } catch (Exception ignored) { }
+                history.clearHistory();
+            }
+        }
+
+        private final class ClipJob implements Runnable {
+            final String path;
+            final BeaconEncodedVideoBuffer.Clip range;
+            volatile boolean cancelled;
+            volatile boolean done;
+            volatile boolean started;
+            volatile String error;
+            MediaFormat format;
+            long startUs;
+            long endUs;
+            int sampleCount;
+
+            ClipJob(String path, BeaconEncodedVideoBuffer.Clip range) {
+                this.path = path;
+                this.range = range;
+            }
+
+            @Override public void run() {
+                MediaMuxer muxer = null;
+                try {
+                    if (cancelled) return;
+                    muxer = new MediaMuxer(path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+                    int track = muxer.addTrack(format);
+                    muxer.start();
+                    MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+                    for (BeaconEncodedVideoBuffer.Sample sample : range.samples) {
+                        if (cancelled) return;
+                        info.set(0, sample.data.length, sample.timeUs - startUs,
+                                sample.flags & ~MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                        muxer.writeSampleData(track, ByteBuffer.wrap(sample.data), info);
+                    }
+                    info.set(0, 0, endUs - startUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                    muxer.writeSampleData(track, ByteBuffer.allocate(0), info);
+                    muxer.stop();
+                } catch (Throwable throwable) {
+                    error = throwable.getClass().getSimpleName() + ": " + throwable.getMessage();
+                } finally {
+                    if (muxer != null) try { muxer.release(); } catch (Exception ignored) { }
+                    history.release(range);
+                    synchronized (SurfaceSession.this) {
+                        // Serialize cancellation with completion: otherwise a
+                        // cancel between the deletion check and publishing done
+                        // can leave an unclaimed MP4 behind.
+                        if (cancelled || error != null) new File(path).delete();
+                        done = true;
+                        if (cancelled && clip == this) clip = null;
+                    }
+                }
+            }
         }
 
         private static MediaCodecInfo findSurfaceCodec() {
@@ -398,17 +548,19 @@ public final class MacacaBeaconVideo {
                 if (!info.isEncoder()) continue;
                 for (String type : info.getSupportedTypes()) {
                     if (!"video/avc".equalsIgnoreCase(type)) continue;
-                    for (MediaCodecInfo.CodecCapabilities capabilities : new MediaCodecInfo.CodecCapabilities[] { info.getCapabilitiesForType(type) })
-                        for (int format : capabilities.colorFormats)
-                            if (format == MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) return info;
+                    MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType(type);
+                    boolean baseline = false;
+                    for (MediaCodecInfo.CodecProfileLevel level : caps.profileLevels)
+                        if (level.profile == MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline) baseline = true;
+                    if (!baseline) continue;
+                    for (int color : caps.colorFormats)
+                        if (color == MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) return info;
                 }
             }
             return null;
         }
 
-        private static int align16(int value) {
-            return (value + 15) & ~15;
-        }
+        private static int align16(int value) { return (value + 15) & ~15; }
     }
 
     private static final class Session {
